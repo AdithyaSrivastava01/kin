@@ -41,6 +41,10 @@ SUPPORTED_LANGUAGES = {"English", "Korean", "Spanish", "Hindi", "Marathi"}
 # Pre-warmed filler audio cache — populated at startup
 _FILLER_CACHE: dict[str, bytes] = {}
 
+# Booking context passed from /call endpoint to WebSocket session
+# Keyed by call SID, consumed once the WS connects
+_CALL_CONTEXT: dict[str, dict] = {}
+
 
 @app.on_event("startup")
 async def _prewarm():
@@ -59,7 +63,14 @@ async def _prewarm():
 # ── Outbound call trigger (called by swarm-caller agent) ────────────
 
 
-def initiate_call(to_number: str, patient_lang: str = "English") -> str:
+def initiate_call(
+    to_number: str,
+    patient_lang: str = "English",
+    patient_name: str | None = None,
+    specialty: str | None = None,
+    insurance: str | None = None,
+    time_pref: str | None = None,
+) -> str:
     """Place an outbound call via Twilio. Returns the call SID."""
     # Sanitize patient_lang to prevent TwiML injection — allow only letters/spaces
     safe_lang = re.sub(r"[^a-zA-Z ]", "", patient_lang) or "English"
@@ -78,6 +89,13 @@ def initiate_call(to_number: str, patient_lang: str = "English") -> str:
         from_=os.getenv("TWILIO_PHONE_NUMBER"),
         twiml=twiml,
     )
+    # Store booking context so the WS handler can build a dynamic script
+    _CALL_CONTEXT[call.sid] = {
+        "patient_name": patient_name,
+        "specialty": specialty,
+        "insurance": insurance,
+        "time_pref": time_pref,
+    }
     return call.sid
 
 
@@ -88,9 +106,14 @@ def initiate_call(to_number: str, patient_lang: str = "English") -> str:
 async def call_endpoint(req: Request):
     """HTTP trigger for placing outbound calls."""
     body = await req.json()
-    to_number = body["to"]
-    patient_lang = body.get("language", "English")
-    sid = initiate_call(to_number, patient_lang)
+    sid = initiate_call(
+        to_number=body["to"],
+        patient_lang=body.get("language", "English"),
+        patient_name=body.get("patient_name"),
+        specialty=body.get("specialty"),
+        insurance=body.get("insurance"),
+        time_pref=body.get("time_pref"),
+    )
     return {"call_sid": sid, "status": "initiated"}
 
 
@@ -118,6 +141,7 @@ async def call_ws(ws: WebSocket):
     mulaw_buffer = bytearray()
     # Shared mutable state so the detection task can signal completion
     state: dict = {"language_detected": None, "detection_in_flight": False}
+    booking_ctx: dict = {}
     DETECT_AFTER_BYTES = 24_000  # ~3s of μ-law 8kHz (8000 bytes/s)
 
     try:
@@ -127,7 +151,10 @@ async def call_ws(ws: WebSocket):
 
             if evt == "start":
                 stream_sid = msg["start"]["streamSid"]
-                print(f"[ws] start streamSid={stream_sid}")
+                call_sid = msg["start"].get("callSid", "")
+                print(f"[ws] start streamSid={stream_sid} callSid={call_sid}")
+                # Retrieve booking context stored by initiate_call
+                booking_ctx = _CALL_CONTEXT.pop(call_sid, {})
                 # NF-7: disclose AI identity immediately on call connect
                 asyncio.create_task(
                     _speak_to_call(ws, stream_sid, "English", stream_disclosure)
@@ -143,7 +170,9 @@ async def call_ws(ws: WebSocket):
                 ):
                     state["detection_in_flight"] = True
                     asyncio.create_task(
-                        _detect_and_respond(ws, stream_sid, bytes(mulaw_buffer), state)
+                        _detect_and_respond(
+                            ws, stream_sid, bytes(mulaw_buffer), state, booking_ctx
+                        )
                     )
 
             elif evt == "stop":
@@ -155,7 +184,11 @@ async def call_ws(ws: WebSocket):
 
 
 async def _detect_and_respond(
-    ws: WebSocket, stream_sid: str, mulaw: bytes, state: dict
+    ws: WebSocket,
+    stream_sid: str,
+    mulaw: bytes,
+    state: dict,
+    booking_ctx: dict | None = None,
 ) -> None:
     """The demo moment: convert → upload → detect → switch voice → speak."""
     loop = asyncio.get_event_loop()
@@ -212,8 +245,20 @@ async def _detect_and_respond(
     except Exception as e:
         print(f"[telemetry] beacon failed (non-fatal): {e!r}")
 
-    # 6. Speak booking script in detected language
-    await _speak_to_call(ws, stream_sid, language)
+    # 6. Speak booking script in detected language with dynamic context
+    ctx = booking_ctx or {}
+    await _speak_to_call(
+        ws,
+        stream_sid,
+        language,
+        tts_source=lambda: stream_booking(
+            language=language,
+            patient_name=ctx.get("patient_name"),
+            specialty=ctx.get("specialty"),
+            insurance=ctx.get("insurance"),
+            time_pref=ctx.get("time_pref"),
+        ),
+    )
 
 
 async def _speak_to_call(
