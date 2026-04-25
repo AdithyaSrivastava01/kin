@@ -21,6 +21,7 @@ from twilio.rest import Client as TwilioClient
 
 from common.audio_prep import mulaw_8k_to_pcm_16k, validate_wav
 from common.telemetry import beacon
+from voice_gateway.confirmation import extract_confirmation
 from voice_gateway.tts import stream_booking, stream_disclosure, stream_filler
 
 load_dotenv()
@@ -398,6 +399,21 @@ async def _speak_to_call(
                 }
             )
         )
+
+
+# ── Booking confirmation extraction ─────────────────────────────────
+
+
+@app.post("/extract-confirmation")
+async def extract_confirmation_endpoint(req: Request):
+    """Extract structured booking details from receptionist audio."""
+    body = await req.json()
+    audio_url = body.get("audio_url")
+    if not audio_url:
+        return JSONResponse({"error": "audio_url required"}, status_code=400)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, extract_confirmation, audio_url)
+    return result
 
 
 # ── Patient-facing filler (called by swarm-intake) ──────────────────
