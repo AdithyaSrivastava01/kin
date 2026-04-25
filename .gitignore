@@ -6,6 +6,7 @@ node_modules/
 .next/
 .vscode/
 .idea/
+.claude/
 .DS_Store
 Thumbs.db
 *.tmp

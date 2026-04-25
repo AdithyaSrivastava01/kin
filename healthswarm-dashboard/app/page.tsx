@@ -22,13 +22,14 @@ const RELAY = process.env.NEXT_PUBLIC_RELAY_URL ?? "http://localhost:3001";
 const nodeStyle = (border: string) => ({
   background: "#0f172a",
   color: "#f1f5f9",
-  border: `2px solid ${border}`,
+  border: `3px solid ${border}`,
   borderRadius: 14,
-  padding: "10px 16px",
-  fontWeight: 600,
-  fontSize: 13,
-  width: 170,
+  padding: "12px 18px",
+  fontWeight: 700,
+  fontSize: 15,
+  width: 190,
   textAlign: "center" as const,
+  boxShadow: `0 0 16px ${border}33`,
 });
 
 const baseNodes: Node[] = [
@@ -91,10 +92,10 @@ export default function Dashboard() {
             target: evt.dst,
             animated: true,
             label: evt.kind,
-            style: { stroke: color, strokeWidth: 2.5 },
-            labelStyle: { fill: "#cbd5e1", fontSize: 11, fontWeight: 600 },
-            labelBgStyle: { fill: "#0f172a", fillOpacity: 0.85 },
-            labelBgPadding: [4, 2],
+            style: { stroke: color, strokeWidth: 3 },
+            labelStyle: { fill: "#f1f5f9", fontSize: 13, fontWeight: 700 },
+            labelBgStyle: { fill: "#0f172a", fillOpacity: 0.92, stroke: color, strokeWidth: 1 },
+            labelBgPadding: [6, 4],
             labelBgBorderRadius: 4,
             markerEnd: { type: MarkerType.ArrowClosed, color },
           };
@@ -141,7 +142,7 @@ export default function Dashboard() {
         </div>
 
         {langAlert && (
-          <div className="absolute top-16 right-4 z-10 bg-amber-500/15 border border-amber-500 text-amber-200 px-4 py-2 rounded-lg animate-pulse text-sm font-semibold shadow-lg">
+          <div className="absolute top-16 right-4 z-10 bg-amber-500/20 border-2 border-amber-400 text-amber-100 px-5 py-3 rounded-lg animate-pulse text-base font-bold shadow-2xl shadow-amber-500/30">
             {langAlert}
           </div>
         )}
@@ -170,12 +171,12 @@ export default function Dashboard() {
         )}
         {feed.map((evt, i) => (
           <div key={`${evt.received_at}-${i}`} className="mb-3">
-            <div className="flex items-center gap-2 text-[11px] text-slate-500 mb-1">
-              <span className="text-emerald-400">{evt.src}</span>
+            <div className="flex items-center gap-2 text-[13px] text-slate-400 mb-1">
+              <span className="text-emerald-400 font-semibold">{evt.src}</span>
               <span>→</span>
-              <span className="text-sky-400">{evt.dst}</span>
+              <span className="text-sky-400 font-semibold">{evt.dst}</span>
               <span
-                className="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold"
+                className="ml-auto px-2 py-0.5 rounded text-[11px] font-bold uppercase tracking-wider"
                 style={{
                   background: `${KIND_COLOR[evt.kind] ?? DEFAULT_EDGE_COLOR}22`,
                   color: KIND_COLOR[evt.kind] ?? DEFAULT_EDGE_COLOR,
@@ -184,7 +185,7 @@ export default function Dashboard() {
                 {evt.kind}
               </span>
             </div>
-            <pre className="text-[11px] bg-slate-950 p-2 rounded border border-slate-800 overflow-x-auto leading-snug text-slate-300">
+            <pre className="text-[13px] bg-slate-950 p-2.5 rounded border border-slate-800 overflow-x-auto leading-snug text-slate-200">
 {JSON.stringify(evt.payload, null, 2)}
             </pre>
           </div>
