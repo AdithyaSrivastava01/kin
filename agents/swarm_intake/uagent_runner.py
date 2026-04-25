@@ -5,9 +5,7 @@ discovered and messaged through Agentverse / ASI:One.
 Usage (from kin/):
   ../.venv/bin/python -m agents.swarm_intake.uagent_runner
 """
-import json
 import os
-import sys
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -40,6 +38,44 @@ agent = Agent(
 
 protocol = Protocol(spec=chat_protocol_spec)
 
+_PERSONA_MAP = {
+    "maria": "maria-001",
+    "joon":  "joon-001",
+    "rahul": "rahul-001",
+}
+
+
+def _resolve_patient(text: str) -> tuple[str, str]:
+    """Return (patient_id, request_text).
+    Priority: explicit patient_id= token > demo first name > default P001.
+    """
+    for token in text.split():
+        if token.startswith("patient_id="):
+            pid = token.split("=", 1)[1]
+            return pid, text.replace(token, "").strip()
+    lower = text.lower()
+    for name, pid in _PERSONA_MAP.items():
+        if name in lower:
+            return pid, text
+    return "P001", text
+
+
+def _format_reply(result: dict) -> str:
+    if "error" in result:
+        return f"Sorry, I couldn't complete the booking: {result['error']}"
+    lines = [
+        f"Booking complete for {result.get('patient_name', 'your patient')}!",
+        f"Clinic:    {result.get('clinic', 'N/A')}",
+        f"Phone:     {result.get('phone', 'N/A')}",
+        f"Language:  {result.get('language', 'English')}",
+    ]
+    if result.get("rationale"):
+        lines.append(f"Why:       {result['rationale']}")
+    reqs = result.get("requirements", {})
+    if reqs.get("time_pref"):
+        lines.append(f"Time pref: {reqs['time_pref']}")
+    return "\n".join(lines)
+
 
 @protocol.on_message(ChatMessage)
 async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
@@ -58,22 +94,32 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
 
     ctx.logger.info(f"[swarm-intake] received: {text[:120]}")
 
+    patient_id, request_text = _resolve_patient(text)
+
+    # Send a progress message before the 30-90s blocking swarm run
+    await ctx.send(
+        sender,
+        ChatMessage(
+            timestamp=datetime.now(timezone.utc),
+            msg_id=uuid4(),
+            content=[TextContent(
+                type="text",
+                text=(
+                    f"Dispatching HealthSwarm agents for patient {patient_id} "
+                    "(profiler, finder, caller, matcher)... "
+                    "This takes 30-90 seconds."
+                ),
+            )],
+        ),
+    )
+
     try:
         from pymongo import MongoClient
         from agents.swarm_intake import agent as intake_agent
 
         db = MongoClient(os.environ["MONGO_URI"]).get_default_database()
-        # Accept "patient_id=P001 ..." or fall back to demo patient
-        patient_id = "P001"
-        request_text = text
-        for token in text.split():
-            if token.startswith("patient_id="):
-                patient_id = token.split("=", 1)[1]
-                request_text = text.replace(token, "").strip()
-                break
-
         result = intake_agent.run(db, patient_id=patient_id, request_text=request_text)
-        reply = json.dumps(result, indent=2)
+        reply = _format_reply(result)
     except Exception as exc:
         ctx.logger.exception("swarm-intake error")
         reply = f"Error: {exc}"
