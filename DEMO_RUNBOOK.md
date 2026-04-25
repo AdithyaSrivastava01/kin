@@ -14,10 +14,13 @@ cd healthswarm-dashboard && npm install && cd ..
 # 3. .env  (copy from .env.example, fill in real values)
 cp .env.example .env   # edit MONGO_URI, ELEVENLABS, TWILIO, etc.
 
-# 4. Seed the database (only once, ~60s)
-python scripts/seed_patients.py
-python scripts/ingest_clinics.py
-python scripts/ingest_rxnorm.py    # optional but adds clinical credibility
+# 4. Seed the database (only once, ~90s)
+python scripts/migrate_v2.py             # patients + insurance + clinic_insurance + medical_records
+python scripts/ingest_clinics.py         # 3,300+ OSM clinics
+
+# 5. (optional) Pre-generate AI medical records — falls back to a stub
+#    if ASI_ONE_API_KEY is missing in .env
+python scripts/profile_patient.py --all
 ```
 
 ## Live-demo checklist (T-15 minutes)
