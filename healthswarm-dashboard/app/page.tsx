@@ -17,7 +17,29 @@ type Beacon = {
   received_at: string;
 };
 
+type Patient = {
+  patient_id: string;
+  name: string;
+  primary_language?: string;
+  insurance_id?: string;
+};
+
+type DocMeta = {
+  doc_id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  description?: string | null;
+  uploaded_at?: string | null;
+};
+
 const RELAY = process.env.NEXT_PUBLIC_RELAY_URL ?? "http://localhost:3001";
+
+function fmtBytes(n: number) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
 
 const nodeStyle = (border: string) => ({
   background: "#0f172a",
@@ -163,7 +185,9 @@ export default function Dashboard() {
       </main>
 
       <aside className="w-1/3 h-full overflow-auto p-4 border-l border-slate-800 bg-slate-900/40">
-        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
+        <UploadPanel />
+
+        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3 mt-6">
           Live payloads
         </h2>
         {feed.length === 0 && (
@@ -192,5 +216,160 @@ export default function Dashboard() {
         ))}
       </aside>
     </div>
+  );
+}
+
+function UploadPanel() {
+  const [patients, setPatients] = useState<Patient[]>([]);
+  const [selected, setSelected] = useState<string>("");
+  const [docs, setDocs] = useState<DocMeta[]>([]);
+  const [file, setFile] = useState<File | null>(null);
+  const [description, setDescription] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  // Load patient roster once
+  useEffect(() => {
+    fetch(`${RELAY}/patients`)
+      .then((r) => r.json())
+      .then((rows: Patient[]) => {
+        setPatients(rows);
+        if (rows.length && !selected) setSelected(rows[0].patient_id);
+      })
+      .catch((e) => setError(`couldn't load patients: ${e}`));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Refresh document list whenever the selected patient changes
+  useEffect(() => {
+    if (!selected) return;
+    fetch(`${RELAY}/documents/${selected}`)
+      .then((r) => r.json())
+      .then(setDocs)
+      .catch(() => setDocs([]));
+  }, [selected]);
+
+  const upload = async () => {
+    if (!file || !selected) return;
+    setBusy(true); setError(null); setSuccess(null);
+    try {
+      const fd = new FormData();
+      fd.append("patient_id", selected);
+      fd.append("file", file);
+      if (description) fd.append("description", description);
+
+      const r = await fetch(`${RELAY}/upload`, { method: "POST", body: fd });
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.detail ?? `HTTP ${r.status}`);
+
+      setSuccess(`uploaded ${body.filename} (${fmtBytes(body.size_bytes)})`);
+      setFile(null);
+      setDescription("");
+
+      // Refresh list
+      const r2 = await fetch(`${RELAY}/documents/${selected}`);
+      setDocs(await r2.json());
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const selectedPatient = patients.find((p) => p.patient_id === selected);
+
+  return (
+    <section>
+      <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
+        📄 Upload patient document
+      </h2>
+
+      <div className="space-y-2">
+        <select
+          value={selected}
+          onChange={(e) => setSelected(e.target.value)}
+          className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm text-slate-200"
+        >
+          {patients.map((p) => (
+            <option key={p.patient_id} value={p.patient_id}>
+              {p.name} ({p.patient_id} · {p.primary_language})
+            </option>
+          ))}
+        </select>
+
+        <input
+          type="file"
+          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          className="block w-full text-xs text-slate-300
+                     file:mr-3 file:py-1.5 file:px-3 file:rounded
+                     file:border-0 file:bg-emerald-600 file:text-white
+                     file:font-semibold hover:file:bg-emerald-500
+                     file:cursor-pointer"
+        />
+
+        <input
+          type="text"
+          placeholder="optional description (e.g. lab report, intake form)"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 placeholder-slate-500"
+        />
+
+        <button
+          onClick={upload}
+          disabled={busy || !file || !selected}
+          className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700
+                     disabled:cursor-not-allowed text-white font-semibold py-1.5 rounded text-sm"
+        >
+          {busy ? "uploading…" : "Upload"}
+        </button>
+
+        {error && (
+          <div className="text-[11px] text-red-300 bg-red-900/30 border border-red-700 px-2 py-1 rounded">
+            {error}
+          </div>
+        )}
+        {success && (
+          <div className="text-[11px] text-emerald-300 bg-emerald-900/30 border border-emerald-700 px-2 py-1 rounded">
+            ✓ {success}
+          </div>
+        )}
+      </div>
+
+      {selectedPatient && (
+        <div className="mt-3">
+          <div className="text-[11px] text-slate-500 uppercase tracking-wider mb-1">
+            {selectedPatient.name}'s documents ({docs.length})
+          </div>
+          {docs.length === 0 ? (
+            <p className="text-slate-600 text-xs italic">no documents uploaded yet</p>
+          ) : (
+            <ul className="space-y-1">
+              {docs.map((d) => (
+                <li
+                  key={d.doc_id}
+                  className="flex items-center gap-2 bg-slate-950 border border-slate-800 px-2 py-1.5 rounded text-xs"
+                >
+                  <a
+                    href={`${RELAY}/document/${d.doc_id}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-emerald-300 hover:text-emerald-200 hover:underline truncate flex-1"
+                    title={d.description ?? ""}
+                  >
+                    {d.filename}
+                  </a>
+                  <span className="text-slate-500 shrink-0">
+                    {fmtBytes(d.size_bytes)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
