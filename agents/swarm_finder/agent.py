@@ -1,12 +1,16 @@
 # swarm_finder — clinic/hospital finder agent (Engineer 1)
+import os
 from common.telemetry import beacon
 from common.geo import eta_from_geojson
 
+FINDER_RADIUS_M = int(os.getenv("FINDER_RADIUS_M", "15000"))
+FINDER_LIMIT    = int(os.getenv("FINDER_LIMIT", "5"))
 
-def run(db, patient_location: dict, specialty: str, radius_m: int = 15_000) -> list[dict]:
+
+def run(db, patient_location: dict, specialty: str, radius_m: int = FINDER_RADIUS_M) -> list[dict]:
     """Find nearby clinics matching the requested specialty via MongoDB 2dsphere $near.
 
-    Returns a list of up to 5 clinic dicts, each enriched with a driving ETA.
+    Returns a list of up to FINDER_LIMIT clinic dicts, each enriched with a driving ETA.
     Emits a CandidatesFound beacon with the top results.
     """
     cursor = db.clinics.find({
@@ -15,7 +19,7 @@ def run(db, patient_location: dict, specialty: str, radius_m: int = 15_000) -> l
             "$geometry": patient_location,
             "$maxDistance": radius_m,
         }},
-    }).limit(5)
+    }).limit(FINDER_LIMIT)
 
     candidates = []
     for c in cursor:

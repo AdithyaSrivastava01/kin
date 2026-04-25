@@ -3,7 +3,7 @@ import threading
 from common.telemetry import beacon
 from common.asi import asi_chat
 from agents.swarm_profiler import agent as profiler
-from agents.swarm_finder import agent as finder
+from agents.swarm_finder import agent as finder, FINDER_RADIUS_M
 from agents.swarm_matcher import agent as matcher
 from agents.swarm_caller import agent as caller
 
@@ -58,7 +58,7 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
             return
         beacon("swarm-intake", "swarm-finder", "ChatMessage", {
             "specialty": specialty,
-            "radius_km": 15,
+            "radius_km": FINDER_RADIUS_M / 1_000,
         })
         candidates.extend(finder.run(db, p["location"], specialty))
 

@@ -1,7 +1,15 @@
 # swarm_matcher — patient-to-provider matching agent (Engineer 1)
+import os
 from common.telemetry import beacon
 from common.asi import asi_chat
 
+# Scoring weights — tunable via environment without code changes
+SCORE_INSURANCE        = float(os.getenv("SCORE_INSURANCE", "3"))
+SCORE_LANGUAGE         = float(os.getenv("SCORE_LANGUAGE", "2"))
+SCORE_PROXIMITY_PER_KM = float(os.getenv("SCORE_PROXIMITY_PER_KM", "1"))
+
+DEMO_PHONE_FALLBACK = os.getenv("DEMO_PHONE_FALLBACK", "+1-555-DEMO")
+MATCHER_MAX_TOKENS  = int(os.getenv("MATCHER_MAX_TOKENS", "64"))
 
 # Language hints embedded in clinic names — good enough for demo data.
 _LANG_KEYWORDS = {
@@ -12,21 +20,21 @@ _LANG_KEYWORDS = {
 }
 
 
-def _language_score(clinic_name: str, patient_language: str) -> int:
+def _language_score(clinic_name: str, patient_language: str) -> float:
     name_lower = clinic_name.lower()
     for kw in _LANG_KEYWORDS.get(patient_language, []):
         if kw in name_lower:
-            return 2
-    return 0
+            return SCORE_LANGUAGE
+    return 0.0
 
 
 def run(db, candidates: list[dict], insurance_provider: str, patient_language: str) -> dict:
     """Rank candidates by insurance coverage, language affinity, and proximity.
 
     Scoring (higher is better):
-      +3  clinic accepts the patient's insurance
-      +2  clinic name suggests the patient's language
-      -1  per km of road distance (from swarm-finder ETA)
+      +SCORE_INSURANCE        clinic accepts the patient's insurance
+      +SCORE_LANGUAGE         clinic name suggests the patient's language
+      -SCORE_PROXIMITY_PER_KM per km of road distance (from swarm-finder ETA)
 
     Emits ClinicMatched beacon and returns the winning clinic dict.
     Returns {} if candidates is empty.
@@ -39,23 +47,19 @@ def run(db, candidates: list[dict], insurance_provider: str, patient_language: s
     for c in candidates:
         score = 0.0
 
-        # Insurance check
         mapping = db.insurance_map.find_one({"clinic_name": c["name"]})
         if mapping and insurance_provider in mapping.get("accepts", []):
-            score += 3
+            score += SCORE_INSURANCE
 
-        # Language affinity
         score += _language_score(c["name"], patient_language)
 
-        # Proximity penalty (-1 per km)
-        score -= c.get("distance_m", 0) / 1_000
+        score -= c.get("distance_m", 0) / 1_000 * SCORE_PROXIMITY_PER_KM
 
         scored.append((score, c))
 
     scored.sort(key=lambda x: x[0], reverse=True)
     best_score, winner = scored[0]
 
-    # Ask the LLM for a one-line human-readable rationale
     rationale = asi_chat(
         system="You are a terse healthcare scheduling assistant. One sentence only.",
         user=(
@@ -63,13 +67,13 @@ def run(db, candidates: list[dict], insurance_provider: str, patient_language: s
             f"with {insurance_provider} insurance who speaks {patient_language}? "
             f"It is {winner.get('distance_m', 0) / 1000:.1f} km away."
         ),
-        max_tokens=64,
+        max_tokens=MATCHER_MAX_TOKENS,
     )
 
     beacon("swarm-matcher", "swarm-intake", "ClinicMatched", {
         "clinic": winner["name"],
         "address": winner.get("address"),
-        "phone": winner.get("phone") or "+1-555-DEMO",
+        "phone": winner.get("phone") or DEMO_PHONE_FALLBACK,
         "score": round(best_score, 2),
         "rationale": rationale,
     })

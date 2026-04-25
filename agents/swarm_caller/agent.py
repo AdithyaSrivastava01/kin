@@ -3,7 +3,9 @@ import os
 import requests
 from common.telemetry import beacon
 
-VOICE_GATEWAY_URL = os.getenv("VOICE_GATEWAY_URL", "http://localhost:8000")
+VOICE_GATEWAY_URL   = os.getenv("VOICE_GATEWAY_URL", "http://localhost:8000")
+DEMO_PHONE_FALLBACK = os.getenv("DEMO_PHONE_FALLBACK", "+1-555-DEMO")
+VOICE_GW_TIMEOUT    = float(os.getenv("VOICE_GW_TIMEOUT", "10"))
 
 
 def run(clinic: dict, patient: dict) -> str:
@@ -17,7 +19,7 @@ def run(clinic: dict, patient: dict) -> str:
 
     Returns the Twilio call SID, or '' on failure.
     """
-    phone = clinic.get("phone") or "+1-555-DEMO"
+    phone = clinic.get("phone") or DEMO_PHONE_FALLBACK
 
     beacon("swarm-caller", "clinic", "CallStarted", {
         "clinic": clinic.get("name"),
@@ -37,7 +39,7 @@ def run(clinic: dict, patient: dict) -> str:
                 "insurance": patient.get("insurance"),
                 "time_pref": patient.get("time_pref"),
             },
-            timeout=10,
+            timeout=VOICE_GW_TIMEOUT,
         )
         resp.raise_for_status()
         return resp.json().get("call_sid", "")
