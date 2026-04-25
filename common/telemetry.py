@@ -1,6 +1,8 @@
+import os
+
 import requests
 
-DASH = "http://localhost:3001/telemetry"
+DASH = os.getenv("TELEMETRY_RELAY_URL", "http://localhost:3001/telemetry")
 
 
 def beacon(src: str, dst: str, kind: str, payload: dict):

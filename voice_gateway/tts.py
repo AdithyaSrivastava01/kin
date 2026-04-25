@@ -19,6 +19,11 @@ VOICE_MAP: dict[str, str] = {
     "Marathi": "pNInz6obpgDQGcFmaJgB",  # Adam (supports Marathi)
 }
 
+AI_DISCLOSURE = (
+    "Hello, this is an AI assistant calling on behalf of a patient "
+    "to book a medical appointment. How can I proceed?"
+)
+
 FILLER_TEXTS: dict[str, str] = {
     "English": "I'm finding the right clinic for you now, just a moment.",
     "Korean": "지금 맞는 병원을 찾고 있습니다. 잠시만 기다려 주세요.",
@@ -57,6 +62,16 @@ BOOKING_SCRIPTS: dict[str, str] = {
 
 def _voice(lang: str) -> str:
     return VOICE_MAP.get(lang, VOICE_MAP["English"])
+
+
+def stream_disclosure():
+    """AI identity disclosure — plays immediately on call connect (English)."""
+    return eleven.text_to_speech.stream(
+        voice_id=_voice("English"),
+        output_format="ulaw_8000",
+        text=AI_DISCLOSURE,
+        model_id="eleven_flash_v2_5",
+    )
 
 
 def stream_filler(language: str = "English"):

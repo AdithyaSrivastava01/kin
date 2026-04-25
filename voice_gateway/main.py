@@ -9,6 +9,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import time
 import uuid
 import requests
@@ -19,7 +20,7 @@ from twilio.rest import Client as TwilioClient
 
 from common.audio_prep import mulaw_8k_to_pcm_16k, validate_wav
 from common.telemetry import beacon
-from voice_gateway.tts import stream_booking, stream_filler
+from voice_gateway.tts import stream_booking, stream_disclosure, stream_filler
 
 load_dotenv()
 
@@ -60,12 +61,14 @@ async def _prewarm():
 
 def initiate_call(to_number: str, patient_lang: str = "English") -> str:
     """Place an outbound call via Twilio. Returns the call SID."""
+    # Sanitize patient_lang to prevent TwiML injection — allow only letters/spaces
+    safe_lang = re.sub(r"[^a-zA-Z ]", "", patient_lang) or "English"
     ngrok_host = NGROK_URL.replace("https://", "").replace("http://", "")
     twiml = (
         "<Response>"
         "<Connect>"
         f'<Stream url="wss://{ngrok_host}/ws/call">'
-        f'<Parameter name="patient_lang" value="{patient_lang}" />'
+        f'<Parameter name="patient_lang" value="{safe_lang}" />'
         "</Stream>"
         "</Connect>"
         "</Response>"
@@ -96,6 +99,9 @@ async def call_endpoint(req: Request):
 
 @app.get("/clips/{clip_id}.wav")
 def serve_clip(clip_id: str):
+    # Prevent path traversal — clip_id must be alphanumeric (hex uuid)
+    if not clip_id.isalnum():
+        return JSONResponse({"error": "invalid clip id"}, status_code=400)
     path = os.path.join(CLIPS_DIR, f"{clip_id}.wav")
     if not os.path.exists(path):
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -122,6 +128,10 @@ async def call_ws(ws: WebSocket):
             if evt == "start":
                 stream_sid = msg["start"]["streamSid"]
                 print(f"[ws] start streamSid={stream_sid}")
+                # NF-7: disclose AI identity immediately on call connect
+                asyncio.create_task(
+                    _speak_to_call(ws, stream_sid, "English", stream_disclosure)
+                )
 
             elif evt == "media" and not state["language_detected"]:
                 payload_b64 = msg["media"]["payload"]
@@ -206,13 +216,19 @@ async def _detect_and_respond(
     await _speak_to_call(ws, stream_sid, language)
 
 
-async def _speak_to_call(ws: WebSocket, stream_sid: str, language: str) -> None:
+async def _speak_to_call(
+    ws: WebSocket,
+    stream_sid: str,
+    language: str,
+    tts_source=None,
+) -> None:
     """Stream TTS ulaw_8000 chunks back to Twilio without blocking event loop."""
     loop = asyncio.get_event_loop()
 
     # Collect TTS chunks in a thread (ElevenLabs SDK is sync)
     def _collect() -> list[bytes]:
-        return list(stream_booking(language))
+        source = tts_source if tts_source else lambda: stream_booking(language)
+        return list(source())
 
     chunks = await loop.run_in_executor(None, _collect)
     for chunk in chunks:
