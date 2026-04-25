@@ -22,7 +22,13 @@ from twilio.rest import Client as TwilioClient
 from common.audio_prep import mulaw_8k_to_pcm_16k, validate_wav
 from common.telemetry import beacon
 from voice_gateway.confirmation import extract_confirmation
-from voice_gateway.tts import stream_booking, stream_disclosure, stream_filler
+from voice_gateway.conversation import ConversationState
+from voice_gateway.tts import (
+    speak_text,
+    stream_booking,
+    stream_disclosure,
+    stream_filler,
+)
 
 load_dotenv()
 
@@ -242,15 +248,25 @@ def serve_clip(clip_id: str):
 # ── Twilio WebSocket handler ─────────────────────────────────────────
 
 
+CONVO_TURN_BYTES = 24_000  # ~3s of μ-law 8kHz — one conversational turn buffer
+CONVO_SILENCE_TIMEOUT_S = 5.0  # if no new audio for 5s, process what we have
+
+
 @app.websocket("/ws/call")
 async def call_ws(ws: WebSocket):
     await ws.accept()
     stream_sid: str | None = None
     mulaw_buffer = bytearray()
-    # Shared mutable state so the detection task can signal completion
-    state: dict = {"language_detected": None, "detection_in_flight": False}
+    state: dict = {
+        "language_detected": None,
+        "detection_in_flight": False,
+        "phase": "detecting",  # detecting → conversing → done
+        "speaking": False,  # True while TTS is playing (don't buffer our own echo)
+    }
     booking_ctx: dict = {}
-    DETECT_AFTER_BYTES = 24_000  # ~3s of μ-law 8kHz (8000 bytes/s)
+    convo_buffer = bytearray()
+    last_media_ts: float = 0.0
+    DETECT_AFTER_BYTES = 24_000
 
     call_sid = ""
     try:
@@ -262,32 +278,51 @@ async def call_ws(ws: WebSocket):
                 stream_sid = msg["start"]["streamSid"]
                 call_sid = msg["start"].get("callSid", "")
                 print(f"[ws] start streamSid={stream_sid} callSid={call_sid}")
-                # Retrieve booking context stored by initiate_call
                 booking_ctx = _CALL_CONTEXT.pop(call_sid, {})
-                # NF-7: disclose AI identity immediately on call connect
                 asyncio.create_task(
                     _speak_to_call(ws, stream_sid, "English", stream_disclosure)
                 )
 
-            elif evt == "media" and not state["language_detected"]:
+            elif evt == "media":
                 payload_b64 = msg["media"]["payload"]
-                mulaw_buffer.extend(base64.b64decode(payload_b64))
+                audio_bytes = base64.b64decode(payload_b64)
+                last_media_ts = time.time()
 
-                if (
-                    len(mulaw_buffer) >= DETECT_AFTER_BYTES
-                    and not state["detection_in_flight"]
-                ):
-                    state["detection_in_flight"] = True
-                    asyncio.create_task(
-                        _detect_and_respond(
-                            ws, stream_sid, bytes(mulaw_buffer), state, booking_ctx
+                # Phase 1: language detection
+                if state["phase"] == "detecting":
+                    mulaw_buffer.extend(audio_bytes)
+                    if (
+                        len(mulaw_buffer) >= DETECT_AFTER_BYTES
+                        and not state["detection_in_flight"]
+                    ):
+                        state["detection_in_flight"] = True
+                        asyncio.create_task(
+                            _detect_and_respond(
+                                ws,
+                                stream_sid,
+                                bytes(mulaw_buffer),
+                                state,
+                                booking_ctx,
+                            )
                         )
-                    )
+
+                # Phase 2: multi-turn conversation
+                elif state["phase"] == "conversing" and not state["speaking"]:
+                    convo_buffer.extend(audio_bytes)
+                    if len(convo_buffer) >= CONVO_TURN_BYTES:
+                        buf = bytes(convo_buffer)
+                        convo_buffer.clear()
+                        asyncio.create_task(
+                            _conversation_turn(ws, stream_sid, buf, state)
+                        )
 
             elif evt == "stop":
                 print("[ws] stop")
-                # Report call outcome for fallthrough logic
                 outcome = state.get("call_outcome", {"status": "completed"})
+                convo = state.get("convo")
+                if convo:
+                    outcome["booking_status"] = convo.booking_status
+                    outcome["turns"] = convo.turns
                 report_call_outcome(call_sid, outcome)
                 break
 
@@ -360,6 +395,7 @@ async def _detect_and_respond(
 
     # 6. Speak booking script in detected language with dynamic context
     ctx = booking_ctx or {}
+    state["speaking"] = True
     await _speak_to_call(
         ws,
         stream_sid,
@@ -372,6 +408,86 @@ async def _detect_and_respond(
             time_pref=ctx.get("time_pref"),
         ),
     )
+    state["speaking"] = False
+
+    # 7. Transition to multi-turn conversation phase
+    state["convo"] = ConversationState(
+        patient_name=ctx.get("patient_name", "the patient"),
+        specialty=ctx.get("specialty", "a doctor"),
+        insurance=ctx.get("insurance", "private"),
+        time_pref=ctx.get("time_pref", "this week"),
+    )
+    state["phase"] = "conversing"
+    print(f"[convo] entering conversation loop (lang={language})")
+
+
+async def _conversation_turn(
+    ws: WebSocket,
+    stream_sid: str,
+    mulaw: bytes,
+    state: dict,
+) -> None:
+    """One turn of the conversation loop: translate → LLM → TTS."""
+    convo: ConversationState = state["convo"]
+    language = state["language_detected"]
+    loop = asyncio.get_event_loop()
+
+    if convo.is_terminal or convo.turns >= ConversationState.MAX_TURNS:
+        state["phase"] = "done"
+        state["call_outcome"] = {"status": convo.booking_status}
+        print(f"[convo] terminal after {convo.turns} turns: {convo.booking_status}")
+        return
+
+    # 1. Convert buffered audio to WAV
+    clip_id = uuid.uuid4().hex
+    wav_path = os.path.join(CLIPS_DIR, f"{clip_id}.wav")
+    await loop.run_in_executor(None, mulaw_8k_to_pcm_16k, mulaw, wav_path)
+    audio_url = f"{NGROK_URL}/clips/{clip_id}.wav"
+
+    # 2. Translate receptionist speech via Gemma
+    def _translate() -> str:
+        try:
+            r = requests.post(
+                f"{GEMMA_URL}/translate",
+                json={"audio_url": audio_url, "target_lang": "en"},
+                timeout=15,
+            )
+            return r.json().get("text", "")
+        except Exception as e:
+            print(f"[convo] translate failed: {e!r}")
+            return ""
+
+    transcript = await loop.run_in_executor(None, _translate)
+    if not transcript.strip():
+        print("[convo] empty transcript, skipping turn")
+        return
+
+    print(f"[convo] receptionist said: {transcript[:100]}")
+
+    # 3. Generate next response via ASI:One
+    response_text = await loop.run_in_executor(None, convo.next_response, transcript)
+    print(f"[convo] responding: {response_text[:100]} (status={convo.booking_status})")
+
+    # 4. Speak response back
+    state["speaking"] = True
+    await _speak_to_call(
+        ws,
+        stream_sid,
+        language,
+        tts_source=lambda: speak_text(response_text, language),
+    )
+    state["speaking"] = False
+
+    # 5. Check terminal state
+    if convo.is_terminal:
+        state["phase"] = "done"
+        state["call_outcome"] = {"status": convo.booking_status}
+        beacon(
+            "swarm-caller",
+            "clinic",
+            "BookingResult",
+            {"status": convo.booking_status, "turns": convo.turns},
+        )
 
 
 async def _speak_to_call(
