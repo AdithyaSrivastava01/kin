@@ -7,10 +7,9 @@ import shutil
 
 def prep_for_gemma(input_path: str) -> list[str]:
     """Returns a list of paths to <=25s mono-16kHz WAV chunks for Gemma E4B."""
-    workdir = tempfile.mkdtemp(prefix="kin_audio_")
+    workdir = tempfile.mkdtemp(prefix="hs_audio_")
     norm = os.path.join(workdir, "normalized.wav")
 
-    # 1. Downmix to mono + resample to 16kHz + 16-bit PCM
     subprocess.run(
         [
             "ffmpeg", "-y", "-i", input_path,
@@ -21,7 +20,6 @@ def prep_for_gemma(input_path: str) -> list[str]:
         capture_output=True,
     )
 
-    # 2. Chunk to 25s segments (5s safety margin under Gemma's 30s cap)
     pattern = os.path.join(workdir, "chunk_%03d.wav")
     subprocess.run(
         [
@@ -37,7 +35,6 @@ def prep_for_gemma(input_path: str) -> list[str]:
 
 
 def cleanup(paths: list[str]):
-    """Remove the temp directory created by prep_for_gemma."""
     if not paths:
         return
     shutil.rmtree(os.path.dirname(paths[0]), ignore_errors=True)

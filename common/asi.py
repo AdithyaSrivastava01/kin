@@ -11,7 +11,7 @@ asi_client = OpenAI(
 
 
 def asi_chat(system: str, user: str, max_tokens: int = 1024) -> str:
-    """Single-call helper hitting ASI:One. Used by every kin-* agent."""
+    """Single-call helper hitting ASI:One. Used by every swarm-* agent."""
     r = asi_client.chat.completions.create(
         model="asi1",
         messages=[
