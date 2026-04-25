@@ -53,7 +53,10 @@ def prep_for_gemma(input_path: str) -> list[str]:
 
 
 def mulaw_8k_to_pcm_16k(mulaw_bytes: bytes, out_path: str) -> str:
-    """Convert Twilio μ-law 8kHz to PCM 16kHz mono WAV for Gemma."""
+    """Convert Twilio μ-law 8kHz to PCM 16kHz mono WAV for Gemma.
+
+    Applies loudnorm filter to handle quiet receptionist audio.
+    """
     raw = tempfile.NamedTemporaryFile(suffix=".ul", delete=False)
     raw.write(mulaw_bytes)
     raw.close()
@@ -70,6 +73,8 @@ def mulaw_8k_to_pcm_16k(mulaw_bytes: bytes, out_path: str) -> str:
                 "1",
                 "-i",
                 raw.name,
+                "-af",
+                "loudnorm=I=-16:TP=-1.5:LRA=11",
                 "-acodec",
                 "pcm_s16le",
                 "-ar",
