@@ -6,6 +6,7 @@ Audio must be 16 kHz mono 16-bit PCM WAV, ≤30s.
 
 import os
 import tempfile
+import threading
 
 import requests
 import torch
@@ -27,6 +28,9 @@ model = (
     .eval()
 )
 print("Model loaded.")
+
+# Prevent concurrent inference — two requests loading VRAM simultaneously → OOM
+_inference_lock = threading.Lock()
 
 app = FastAPI(title="HealthSwarm Gemma Server")
 
@@ -64,18 +68,21 @@ def _fetch_audio(url: str) -> str:
 
 
 def _generate(messages: list[dict], max_new_tokens: int = 20) -> str:
-    inputs = processor.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        tokenize=True,
-        return_dict=True,
-        return_tensors="pt",
-    ).to(model.device, dtype=model.dtype)
+    with _inference_lock:
+        inputs = processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(model.device, dtype=model.dtype)
 
-    input_len = inputs["input_ids"].shape[-1]
-    with torch.inference_mode():
-        gen = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
-    return processor.batch_decode(gen[:, input_len:], skip_special_tokens=True)[0]
+        input_len = inputs["input_ids"].shape[-1]
+        with torch.inference_mode():
+            gen = model.generate(
+                **inputs, max_new_tokens=max_new_tokens, do_sample=False
+            )
+        return processor.batch_decode(gen[:, input_len:], skip_special_tokens=True)[0]
 
 
 # ── /detect-language ────────────────────────────────────────────────
