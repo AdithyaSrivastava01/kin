@@ -1,4 +1,4 @@
-# swarm_caller — telephony/outreach agent (Engineer 1)
+# swarm_caller — telephony/outreach agent
 import os
 import time
 import threading
@@ -13,6 +13,20 @@ DEMO_PHONE_FALLBACK = os.getenv("DEMO_PHONE_FALLBACK",  "+1-555-DEMO")
 VOICE_GW_TIMEOUT    = float(os.getenv("VOICE_GW_TIMEOUT",    "10"))
 CALL_POLL_INTERVAL  = float(os.getenv("CALL_POLL_INTERVAL_S", "5"))
 CALL_MAX_WAIT       = float(os.getenv("CALL_MAX_WAIT_S",      "150"))
+
+
+def _failed_fingerprint(clinic: dict, reason: str) -> dict:
+    """Build a fingerprint dict locally for an unreachable clinic — no LLM round-trip."""
+    name = clinic.get("name", "Unknown clinic")
+    return {
+        "clinic_name":        name,
+        "clinic":             clinic,
+        "available":          False,
+        "insurance_accepted": None,
+        "wait_time":          None,
+        "key_facts":          [reason],
+        "summary":            f"{name} unreachable — {reason}.",
+    }
 
 
 def _call_one(
@@ -50,13 +64,13 @@ def _call_one(
         call_sid = resp.json().get("call_sid", "")
     except Exception as e:
         print(f"[swarm-caller] call to {clinic.get('name')} failed to start: {e!r}")
-        fp = fingerprint.run(clinic, [], requirements)
         with lock:
-            out.append(fp)
+            out.append(_failed_fingerprint(clinic, f"call could not be placed: {e}"))
         return
 
     # 2 — Poll /transcript/{call_sid} until the call finishes or we time out
-    transcript = []
+    transcript: list = []
+    completed = False
     deadline = time.time() + CALL_MAX_WAIT
     while time.time() < deadline:
         try:
@@ -65,16 +79,21 @@ def _call_one(
                 timeout=5,
             )
             if r.status_code == 200:
-                data = r.json()
-                transcript = data.get("transcript", [])
+                transcript = r.json().get("transcript", [])
+                completed = True
                 break
             # 202 = still in progress, keep polling
         except Exception:
             pass
         time.sleep(CALL_POLL_INTERVAL)
 
-    # 3 — Fingerprint this call's transcript
-    fp = fingerprint.run(clinic, transcript, requirements)
+    # 3 — Fingerprint the call. Skip the LLM for unreachable/timeout cases.
+    if not completed:
+        fp = _failed_fingerprint(clinic, "call did not complete within timeout")
+    elif not transcript:
+        fp = _failed_fingerprint(clinic, "call connected but no transcript captured")
+    else:
+        fp = fingerprint.run(clinic, transcript, requirements)
     with lock:
         out.append(fp)
 

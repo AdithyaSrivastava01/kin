@@ -1,4 +1,4 @@
-# swarm_intake — orchestrator agent (Engineer 1)
+# swarm_intake — orchestrator agent
 import json
 import threading
 
@@ -86,7 +86,6 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
     if not specialty:
         specialty = _parse_specialty(request_text) if request_text else "clinic"
 
-    # ── Parallel fan-out: profiler + finder ─────────────────────────────
     profile: dict    = {}
     candidates: list = []
 
@@ -114,11 +113,9 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
     if not profile:
         return {"error": f"patient {patient_id!r} not found"}
 
-    # ── Extract per-conversation requirements ────────────────────────────
     profile["specialty"] = specialty
     requirements = _parse_requirements(request_text, profile)
 
-    # ── Concurrent calls to all candidates → fingerprints ────────────────
     beacon("swarm-intake", "swarm-caller", "ChatMessage", {
         "clinics":     [c["name"] for c in candidates[:3]],
         "language":    requirements.get("language"),
@@ -129,7 +126,6 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
     if not fingerprints:
         return {"error": "no clinics reachable", "profile": profile}
 
-    # ── LLM judge picks the winner ───────────────────────────────────────
     beacon("swarm-intake", "swarm-matcher", "ChatMessage", {
         "fingerprints": len(fingerprints),
         "requirements": requirements,

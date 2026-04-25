@@ -63,12 +63,13 @@ _CALL_OUTCOMES: dict[str, asyncio.Future] = {}
 # Read by swarm-fingerprint via GET /transcript/{call_sid}.
 _CALL_TRANSCRIPTS: dict[str, list[dict]] = {}
 _CALL_RESULTS:     dict[str, dict]       = {}
+_CALL_TIMESTAMPS:  dict[str, float]      = {}
 
 MAX_FALLTHROUGH_ATTEMPTS = 3
 
 
 async def _cleanup_clips_loop() -> None:
-    """Periodically delete WAV clips older than CLIP_MAX_AGE_S."""
+    """Periodically delete stale WAV clips and stale transcript-store entries."""
     while True:
         await asyncio.sleep(CLIP_CLEANUP_INTERVAL_S)
         now = time.time()
@@ -80,8 +81,14 @@ async def _cleanup_clips_loop() -> None:
                     removed += 1
             except OSError:
                 pass
-        if removed:
-            print(f"[cleanup] removed {removed} stale clips")
+        stale_sids = [sid for sid, ts in _CALL_TIMESTAMPS.items()
+                      if now - ts > CLIP_MAX_AGE_S]
+        for sid in stale_sids:
+            _CALL_TRANSCRIPTS.pop(sid, None)
+            _CALL_RESULTS.pop(sid, None)
+            _CALL_TIMESTAMPS.pop(sid, None)
+        if removed or stale_sids:
+            print(f"[cleanup] removed {removed} clips, {len(stale_sids)} transcript entries")
 
 
 @app.on_event("startup")
@@ -331,6 +338,7 @@ async def call_ws(ws: WebSocket):
                 if call_sid:
                     _CALL_TRANSCRIPTS[call_sid] = list(convo.history) if convo else []
                     _CALL_RESULTS[call_sid] = outcome
+                    _CALL_TIMESTAMPS[call_sid] = time.time()
                 report_call_outcome(call_sid, outcome)
                 break
 
@@ -339,6 +347,7 @@ async def call_ws(ws: WebSocket):
         if call_sid:
             _CALL_TRANSCRIPTS[call_sid] = []
             _CALL_RESULTS[call_sid] = {"status": "failed", "error": str(e)}
+            _CALL_TIMESTAMPS[call_sid] = time.time()
         report_call_outcome(call_sid, {"status": "failed", "error": str(e)})
 
 
@@ -567,9 +576,9 @@ def get_transcript(call_sid: str):
     """Return the transcript + result for a completed call.
 
     Returns 202 while the call is still in progress.
-    call_sid is a Twilio SID (alphanumeric, up to 34 chars).
+    call_sid must be a Twilio call SID (CA followed by 32 alphanumerics).
     """
-    if not re.fullmatch(r"[A-Za-z0-9]{1,34}", call_sid):
+    if not re.fullmatch(r"CA[A-Za-z0-9]{32}", call_sid):
         return JSONResponse({"error": "invalid call_sid"}, status_code=400)
     if call_sid not in _CALL_RESULTS:
         return JSONResponse({"status": "pending"}, status_code=202)
