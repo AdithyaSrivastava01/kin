@@ -59,6 +59,11 @@ _CALL_CONTEXT: dict[str, dict] = {}
 # Values: asyncio.Future resolving to {"status": "booked"|"failed"|"no_answer", ...}
 _CALL_OUTCOMES: dict[str, asyncio.Future] = {}
 
+# Transcript + result store — keyed by call SID, written when WS closes.
+# Read by swarm-fingerprint via GET /transcript/{call_sid}.
+_CALL_TRANSCRIPTS: dict[str, list[dict]] = {}
+_CALL_RESULTS:     dict[str, dict]       = {}
+
 MAX_FALLTHROUGH_ATTEMPTS = 3
 
 
@@ -323,11 +328,17 @@ async def call_ws(ws: WebSocket):
                 if convo:
                     outcome["booking_status"] = convo.booking_status
                     outcome["turns"] = convo.turns
+                if call_sid:
+                    _CALL_TRANSCRIPTS[call_sid] = list(convo.history) if convo else []
+                    _CALL_RESULTS[call_sid] = outcome
                 report_call_outcome(call_sid, outcome)
                 break
 
     except Exception as e:
         print(f"[ws] error: {e!r}")
+        if call_sid:
+            _CALL_TRANSCRIPTS[call_sid] = []
+            _CALL_RESULTS[call_sid] = {"status": "failed", "error": str(e)}
         report_call_outcome(call_sid, {"status": "failed", "error": str(e)})
 
 
@@ -545,6 +556,27 @@ async def play_filler(req: Request):
         "audio_b64": base64.b64encode(audio).decode("ascii"),
         "format": "ulaw_8000",
         "language": lang,
+    }
+
+
+# ── Transcript retrieval (read by swarm-fingerprint) ─────────────────
+
+
+@app.get("/transcript/{call_sid}")
+def get_transcript(call_sid: str):
+    """Return the transcript + result for a completed call.
+
+    Returns 202 while the call is still in progress.
+    call_sid is a Twilio SID (alphanumeric, up to 34 chars).
+    """
+    if not re.fullmatch(r"[A-Za-z0-9]{1,34}", call_sid):
+        return JSONResponse({"error": "invalid call_sid"}, status_code=400)
+    if call_sid not in _CALL_RESULTS:
+        return JSONResponse({"status": "pending"}, status_code=202)
+    return {
+        "call_sid": call_sid,
+        "transcript": _CALL_TRANSCRIPTS.get(call_sid, []),
+        "result": _CALL_RESULTS[call_sid],
     }
 
 
