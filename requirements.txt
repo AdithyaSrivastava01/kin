@@ -1,0 +1,10 @@
+uagents
+openai
+python-dotenv
+pymongo
+requests
+fastapi
+uvicorn
+elevenlabs
+sse-starlette
+pandas
