@@ -1,4 +1,4 @@
-# swarm_profiler — patient profiling agent (Engineer 1)
+# swarm_profiler — patient profiling agent
 from common.telemetry import beacon
 
 
@@ -10,8 +10,9 @@ def run(db, patient_id: str) -> dict:
     """
     p = db.patients.find_one({"patient_id": patient_id})
     if not p:
-        beacon("swarm-profiler", "swarm-intake", "ProfileLoaded", {
-            "error": f"patient {patient_id!r} not found",
+        beacon("swarm-profiler", "swarm-intake", "ProfileError", {
+            "patient_id": patient_id,
+            "reason": "not_found",
         })
         return {}
 

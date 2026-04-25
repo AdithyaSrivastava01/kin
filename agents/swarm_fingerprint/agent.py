@@ -1,4 +1,4 @@
-# swarm_fingerprint — call transcript summariser (Engineer 1)
+# swarm_fingerprint — call transcript summariser
 import json
 import os
 

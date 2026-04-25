@@ -1,4 +1,4 @@
-# swarm_finder — clinic/hospital finder agent (Engineer 1)
+# swarm_finder — clinic/hospital finder agent
 import os
 from common.telemetry import beacon
 from common.geo import eta_from_geojson
