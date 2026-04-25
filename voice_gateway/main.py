@@ -7,6 +7,7 @@ Then: ngrok http 8000
 
 import asyncio
 import base64
+import glob
 import json
 import os
 import re
@@ -37,6 +38,8 @@ CLIPS_DIR = "/tmp/healthswarm_clips"
 os.makedirs(CLIPS_DIR, exist_ok=True)
 
 SUPPORTED_LANGUAGES = {"English", "Korean", "Spanish", "Hindi", "Marathi"}
+CLIP_MAX_AGE_S = 300  # delete WAV clips older than 5 minutes
+CLIP_CLEANUP_INTERVAL_S = 60  # run cleanup every 60 seconds
 
 # Pre-warmed filler audio cache — populated at startup
 _FILLER_CACHE: dict[str, bytes] = {}
@@ -46,8 +49,26 @@ _FILLER_CACHE: dict[str, bytes] = {}
 _CALL_CONTEXT: dict[str, dict] = {}
 
 
+async def _cleanup_clips_loop() -> None:
+    """Periodically delete WAV clips older than CLIP_MAX_AGE_S."""
+    while True:
+        await asyncio.sleep(CLIP_CLEANUP_INTERVAL_S)
+        now = time.time()
+        removed = 0
+        for path in glob.glob(os.path.join(CLIPS_DIR, "*.wav")):
+            try:
+                if now - os.path.getmtime(path) > CLIP_MAX_AGE_S:
+                    os.unlink(path)
+                    removed += 1
+            except OSError:
+                pass
+        if removed:
+            print(f"[cleanup] removed {removed} stale clips")
+
+
 @app.on_event("startup")
 async def _prewarm():
+    asyncio.create_task(_cleanup_clips_loop())
     loop = asyncio.get_event_loop()
     for lang in SUPPORTED_LANGUAGES:
         try:
