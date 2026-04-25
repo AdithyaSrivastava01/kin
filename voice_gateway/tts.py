@@ -16,6 +16,7 @@ VOICE_MAP: dict[str, str] = {
     "Korean": "jBpfuIE2acCO8z3wKNLl",  # Gigi
     "Spanish": "EXAVITQu4vr4xnSDxMaL",  # Bella
     "Hindi": "pNInz6obpgDQGcFmaJgB",  # Adam
+    "Marathi": "pNInz6obpgDQGcFmaJgB",  # Adam (supports Marathi)
 }
 
 FILLER_TEXTS: dict[str, str] = {
@@ -23,6 +24,7 @@ FILLER_TEXTS: dict[str, str] = {
     "Korean": "지금 맞는 병원을 찾고 있습니다. 잠시만 기다려 주세요.",
     "Spanish": "Estoy buscando la clínica adecuada para usted, un momento por favor.",
     "Hindi": "मैं आपके लिए सही क्लिनिक खोज रहा हूँ, एक पल रुकिए।",
+    "Marathi": "मी तुमच्यासाठी योग्य क्लिनिक शोधत आहे, कृपया एक क्षण थांबा.",
 }
 
 BOOKING_SCRIPTS: dict[str, str] = {
@@ -44,6 +46,11 @@ BOOKING_SCRIPTS: dict[str, str] = {
         "नमस्ते, मैं एक मरीज की ओर से अपॉइंटमेंट बुक करने के लिए कॉल "
         "कर रहा एक AI सहायक हूँ। उन्हें त्वचा विशेषज्ञ को दिखाना है। "
         "क्या इस हफ्ते कोई समय उपलब्ध है?"
+    ),
+    "Marathi": (
+        "नमस्कार, मी एका रुग्णाच्या वतीने अपॉइंटमेंट बुक करण्यासाठी "
+        "कॉल करत असलेला AI सहाय्यक आहे. त्यांना त्वचारोग तज्ञांना "
+        "भेटायचे आहे. या आठवड्यात काही वेळ उपलब्ध आहे का?"
     ),
 }
 

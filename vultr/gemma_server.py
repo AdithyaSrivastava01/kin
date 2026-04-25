@@ -43,6 +43,8 @@ LANGUAGE_ALIASES: dict[str, str] = {
     "mandarin": "Mandarin",
     "chinese": "Mandarin",
     "mandarin chinese": "Mandarin",
+    "marathi": "Marathi",
+    "मराठी": "Marathi",
 }
 
 

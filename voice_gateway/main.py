@@ -42,7 +42,7 @@ _FILLER_CACHE: dict[str, bytes] = {}
 
 @app.on_event("startup")
 async def _prewarm():
-    for lang in ["English", "Korean", "Spanish", "Hindi"]:
+    for lang in ["English", "Korean", "Spanish", "Hindi", "Marathi"]:
         try:
             _FILLER_CACHE[lang] = b"".join(stream_filler(lang))
             print(f"[prewarm] filler/{lang}: {len(_FILLER_CACHE[lang])} bytes")
