@@ -48,6 +48,12 @@ _FILLER_CACHE: dict[str, bytes] = {}
 # Keyed by call SID, consumed once the WS connects
 _CALL_CONTEXT: dict[str, dict] = {}
 
+# Call outcome tracking — set by WS handler, read by fallthrough logic
+# Values: asyncio.Future resolving to {"status": "booked"|"failed"|"no_answer", ...}
+_CALL_OUTCOMES: dict[str, asyncio.Future] = {}
+
+MAX_FALLTHROUGH_ATTEMPTS = 3
+
 
 async def _cleanup_clips_loop() -> None:
     """Periodically delete WAV clips older than CLIP_MAX_AGE_S."""
@@ -120,6 +126,71 @@ def initiate_call(
     return call.sid
 
 
+async def call_with_fallthrough(
+    ranked_clinics: list[dict],
+    patient_lang: str = "English",
+    patient_name: str | None = None,
+    specialty: str | None = None,
+    insurance: str | None = None,
+    time_pref: str | None = None,
+) -> dict:
+    """Try calling ranked clinics in order until one succeeds or attempts exhausted.
+
+    Each clinic dict must have at minimum {"phone": str, "name": str}.
+    Returns {"status": "booked"|"exhausted", "clinic": ..., "attempts": int}.
+    """
+    attempts = min(len(ranked_clinics), MAX_FALLTHROUGH_ATTEMPTS)
+    for i in range(attempts):
+        clinic = ranked_clinics[i]
+        phone = clinic["phone"]
+        clinic_name = clinic.get("name", phone)
+
+        print(f"[fallthrough] attempt {i + 1}/{attempts}: {clinic_name}")
+
+        outcome_future: asyncio.Future = asyncio.get_event_loop().create_future()
+        sid = initiate_call(
+            to_number=phone,
+            patient_lang=patient_lang,
+            patient_name=patient_name,
+            specialty=specialty,
+            insurance=insurance,
+            time_pref=time_pref,
+        )
+        _CALL_OUTCOMES[sid] = outcome_future
+
+        try:
+            result = await asyncio.wait_for(outcome_future, timeout=120)
+        except asyncio.TimeoutError:
+            result = {"status": "no_answer"}
+        finally:
+            _CALL_OUTCOMES.pop(sid, None)
+
+        beacon(
+            "swarm-caller",
+            "clinic",
+            "CallAttempt",
+            {
+                "clinic": clinic_name,
+                "attempt": i + 1,
+                "outcome": result.get("status", "unknown"),
+            },
+        )
+
+        if result.get("status") == "booked":
+            return {"status": "booked", "clinic": clinic, "attempts": i + 1, **result}
+
+        print(f"[fallthrough] {clinic_name} → {result.get('status')}, trying next")
+
+    return {"status": "exhausted", "attempts": attempts}
+
+
+def report_call_outcome(call_sid: str, outcome: dict) -> None:
+    """Called by WS handler or external hook to report how a call ended."""
+    future = _CALL_OUTCOMES.get(call_sid)
+    if future and not future.done():
+        future.set_result(outcome)
+
+
 # ── REST endpoint: initiate call via HTTP ────────────────────────────
 
 
@@ -136,6 +207,21 @@ async def call_endpoint(req: Request):
         time_pref=body.get("time_pref"),
     )
     return {"call_sid": sid, "status": "initiated"}
+
+
+@app.post("/call/fallthrough")
+async def call_fallthrough_endpoint(req: Request):
+    """Try ranked clinics in order until booking succeeds or attempts exhausted."""
+    body = await req.json()
+    result = await call_with_fallthrough(
+        ranked_clinics=body["clinics"],
+        patient_lang=body.get("language", "English"),
+        patient_name=body.get("patient_name"),
+        specialty=body.get("specialty"),
+        insurance=body.get("insurance"),
+        time_pref=body.get("time_pref"),
+    )
+    return result
 
 
 # ── Public clip route (Gemma fetches audio from here) ────────────────
@@ -165,6 +251,7 @@ async def call_ws(ws: WebSocket):
     booking_ctx: dict = {}
     DETECT_AFTER_BYTES = 24_000  # ~3s of μ-law 8kHz (8000 bytes/s)
 
+    call_sid = ""
     try:
         while True:
             msg = json.loads(await ws.receive_text())
@@ -198,10 +285,14 @@ async def call_ws(ws: WebSocket):
 
             elif evt == "stop":
                 print("[ws] stop")
+                # Report call outcome for fallthrough logic
+                outcome = state.get("call_outcome", {"status": "completed"})
+                report_call_outcome(call_sid, outcome)
                 break
 
     except Exception as e:
         print(f"[ws] error: {e!r}")
+        report_call_outcome(call_sid, {"status": "failed", "error": str(e)})
 
 
 async def _detect_and_respond(
