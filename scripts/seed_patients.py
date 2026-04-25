@@ -24,15 +24,23 @@ PATIENTS = [
         "location": {"type": "Point", "coordinates": [-118.2283, 34.0335]},
         "insurance": {"provider": "Blue Shield", "plan": "PPO"},
         "medications": [
-            {"name": "Metformin 500 MG Oral Tablet", "rxcui": "860974", "dosage": "500mg 2x daily"},
-            {"name": "Lisinopril 10 MG Oral Tablet", "rxcui": "314076", "dosage": "10mg 1x daily"},
+            {
+                "name": "Metformin 500 MG Oral Tablet",
+                "rxcui": "860974",
+                "dosage": "500mg 2x daily",
+            },
+            {
+                "name": "Lisinopril 10 MG Oral Tablet",
+                "rxcui": "314076",
+                "dosage": "10mg 1x daily",
+            },
         ],
         "allergies": ["Penicillin"],
         "diagnoses": ["Type 2 Diabetes", "Hypertension"],
         "last_visits": {
             "primary_care": "2025-11-15",
-            "eye_exam":     "2025-02-20",
-            "dental":       "2025-08-10",
+            "eye_exam": "2025-02-20",
+            "dental": "2025-08-10",
         },
         "emergency_contact": {"name": "Carlos Gonzalez", "phone": "+1-213-555-0142"},
     },
@@ -48,7 +56,7 @@ PATIENTS = [
         "allergies": [],
         "diagnoses": ["Mild Eczema"],
         "last_visits": {
-            "dermatology":  "2024-09-05",
+            "dermatology": "2024-09-05",
             "primary_care": "2025-06-20",
         },
         "prior_providers": [
@@ -70,34 +78,44 @@ PATIENTS = [
         "location": {"type": "Point", "coordinates": [-118.0839, 33.8675]},
         "insurance": {"provider": "Cigna", "plan": "PPO"},
         "medications": [
-            {"name": "Atorvastatin 20 MG Oral Tablet", "rxcui": "617311", "dosage": "20mg 1x daily"},
+            {
+                "name": "Atorvastatin 20 MG Oral Tablet",
+                "rxcui": "617311",
+                "dosage": "20mg 1x daily",
+            },
         ],
         "allergies": ["Sulfa drugs"],
         "diagnoses": ["Hyperlipidemia"],
         "family_history": ["Cardiac disease (father)", "Type 2 Diabetes (mother)"],
         "last_visits": {
-            "cardiology":         "2025-08-14",
-            "primary_care":       "2026-01-10",
-            "cholesterol_panel":  "2025-08-14",
+            "cardiology": "2025-08-14",
+            "primary_care": "2026-01-10",
+            "cholesterol_panel": "2025-08-14",
         },
         "emergency_contact": {"name": "Priya Sharma", "phone": "+1-562-555-0167"},
     },
 ]
 
 INSURANCE_MAP = [
-    {"clinic_name": "Seoul Dermatology",   "accepts": ["Aetna", "Blue Shield", "Cigna"]},
+    {"clinic_name": "Seoul Dermatology", "accepts": ["Aetna", "Blue Shield", "Cigna"]},
     {"clinic_name": "LA Skin Care Center", "accepts": ["Blue Shield", "Cigna"]},
-    {"clinic_name": "Koreatown Medical",   "accepts": ["Aetna", "Blue Shield"]},
-    {"clinic_name": "Boyle Heights Clinic","accepts": ["Blue Shield", "Medi-Cal"]},
-    {"clinic_name": "Artesia Heart Center","accepts": ["Cigna", "Aetna", "Blue Shield"]},
+    {"clinic_name": "Koreatown Medical", "accepts": ["Aetna", "Blue Shield"]},
+    {"clinic_name": "Boyle Heights Clinic", "accepts": ["Blue Shield", "Medi-Cal"]},
+    {
+        "clinic_name": "Artesia Heart Center",
+        "accepts": ["Cigna", "Aetna", "Blue Shield"],
+    },
 ]
 
 
 def seed():
     uri = os.getenv("MONGO_URI")
     if not uri or "<" in uri:
-        print("ERROR: MONGO_URI is not set (or still has placeholder). "
-              "Add it to .env and re-run.", file=sys.stderr)
+        print(
+            "ERROR: MONGO_URI is not set (or still has placeholder). "
+            "Add it to .env and re-run.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     db = MongoClient(uri, serverSelectionTimeoutMS=5_000)["healthswarm"]
