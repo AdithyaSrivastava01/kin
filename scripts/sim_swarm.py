@@ -21,6 +21,7 @@ import os
 import random
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 
 import requests
@@ -87,11 +88,16 @@ def build_scenario(db, patient_id: str) -> list[Event]:
         med = {"medications": [], "allergies": [], "diagnoses": [],
                "ai_notes": "(no record)", "generated_by": "missing"}
 
+    outreach_id = uuid.uuid4().hex[:12]
+
     events: list[Event] = [
         Event("patient", "swarm-intake", "AppointmentRequest", {
-            "patient_id": patient_id,
-            "query": f"{p['name']} needs an appointment {scenario['ask']}.",
-            "language": p["primary_language"],
+            "outreach_id":  outreach_id,
+            "patient_id":   patient_id,
+            "patient_name": p["name"],
+            "query":        f"{p['name']} needs an appointment {scenario['ask']}.",
+            "language":     p["primary_language"],
+            "specialty":    specialty,
         }, delay=0.0),
 
         # Fan out to profiler + finder in parallel (small gap)
@@ -119,9 +125,10 @@ def build_scenario(db, patient_id: str) -> list[Event]:
 
         # Finder returns slightly later (geo query)
         Event("swarm-finder", "swarm-intake", "CandidatesFound", {
-            "specialty": specialty,
-            "count":     len(candidates),
-            "top":       [c["name"] for c in candidates[:3]],
+            "outreach_id": outreach_id,
+            "specialty":   specialty,
+            "count":       len(candidates),
+            "top":         [c["name"] for c in candidates[:3]],
         }, delay=1.4),
 
         # Hand off to matcher
@@ -133,11 +140,12 @@ def build_scenario(db, patient_id: str) -> list[Event]:
 
         # Matcher picks the winner
         Event("swarm-matcher", "swarm-intake", "ClinicMatched", {
-            "clinic":    matched["name"] if matched else None,
-            "address":   (matched or {}).get("address"),
-            "phone":     (matched or {}).get("phone") or "+1-555-DEMO",
-            "score":     round(random.uniform(0.78, 0.96), 2),
-            "rationale": "specialty + insurance_id + proximity",
+            "outreach_id": outreach_id,
+            "clinic":      matched["name"] if matched else None,
+            "address":     (matched or {}).get("address"),
+            "phone":       (matched or {}).get("phone") or "+1-555-DEMO",
+            "score":       round(random.uniform(0.78, 0.96), 2),
+            "rationale":   "specialty + insurance_id + proximity",
         }, delay=1.1),
 
         # Hand the booking task to swarm-caller (E2's voice gateway will
@@ -162,7 +170,7 @@ def run_once(events: list[Event], speed: float = 1.0) -> int:
             r = requests.post(RELAY, json={
                 "src": evt.src, "dst": evt.dst,
                 "kind": evt.kind, "payload": evt.payload,
-            }, timeout=2)
+            }, timeout=5)
             ok = r.ok
         except Exception as e:
             print(f"  [warn] beacon failed: {e!r}")

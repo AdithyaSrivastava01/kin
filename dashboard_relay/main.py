@@ -73,6 +73,9 @@ def _mongo():
         _db = client["healthswarm"]
         _fs = GridFS(_db)
         _db["patient_documents"].create_index([("patient_id", 1), ("uploaded_at", -1)])
+        _db["outreach_attempts"].create_index([("outreach_id", 1)], unique=True)
+        _db["outreach_attempts"].create_index([("started_at", -1)])
+        _db["outreach_attempts"].create_index([("patient_id", 1), ("started_at", -1)])
     return _db, _fs
 
 
@@ -84,6 +87,137 @@ def _broadcast(evt: dict):
             q.put_nowait(evt)
         except asyncio.QueueFull:
             pass
+    # Persist to outreach_attempts if this beacon belongs to an outreach
+    try:
+        _correlate_outreach(evt)
+    except Exception as e:
+        print(f"[outreach] correlation failed (non-fatal): {e!r}")
+
+
+def _summarize(doc: dict) -> str:
+    """Build a one-line human summary from whatever fields we have."""
+    parts = []
+    if doc.get("clinic_name"):
+        parts.append(f"Reached {doc['clinic_name']}")
+    if doc.get("language_detected"):
+        match = "" if doc.get("language_match") in (None, True) else " (mismatch)"
+        parts.append(f"{doc['language_detected']}-speaking{match}")
+    outcome = doc.get("outcome")
+    if outcome == "booked":
+        when = doc.get("booking_when") or "appointment"
+        parts.append(f"booked {when}")
+    elif outcome == "no_answer":
+        parts.append("no answer")
+    elif outcome == "language_mismatch":
+        parts.append("could not communicate")
+    elif outcome == "failed":
+        parts.append("call failed")
+    elif outcome == "in_progress":
+        parts.append("call in progress")
+    elif not outcome:
+        parts.append("dispatched")
+    return " · ".join(parts) if parts else "(no details)"
+
+
+def _correlate_outreach(evt: dict):
+    """Map relevant beacons into the outreach_attempts collection.
+
+    Beacons MUST carry payload.outreach_id for correlation. Beacons
+    without it are silently skipped (non-outreach telemetry).
+    """
+    payload = evt.get("payload") or {}
+    oid = payload.get("outreach_id")
+    if not oid:
+        return
+
+    db, _ = _mongo()
+    coll = db["outreach_attempts"]
+    kind = evt.get("kind")
+    received_at = evt.get("received_at")
+
+    # Always append the raw beacon as a mini-transcript entry
+    base_update = {"$push": {"events": {"kind": kind, "at": received_at, "payload": payload}}}
+
+    if kind == "AppointmentRequest":
+        # First touch — create the row.
+        # NOTE: don't init "events": [] here; $push below will create
+        # the array. Setting + pushing the same path conflicts in Mongo.
+        coll.update_one(
+            {"outreach_id": oid},
+            {
+                "$setOnInsert": {
+                    "patient_id":       payload.get("patient_id"),
+                    "patient_name":     payload.get("patient_name"),
+                    "language_request": payload.get("language"),
+                    "specialty":        payload.get("specialty"),
+                    "started_at":       datetime.fromisoformat(received_at.replace("Z", "+00:00")) if received_at else datetime.now(timezone.utc),
+                    "outcome":          "in_progress",
+                },
+                **base_update,
+            },
+            upsert=True,
+        )
+        return
+
+    if kind == "CandidatesFound":
+        coll.update_one({"outreach_id": oid}, {
+            "$set":  {"candidates_count": payload.get("count")},
+            **base_update,
+        }, upsert=True)
+        return
+
+    if kind == "ClinicMatched":
+        coll.update_one({"outreach_id": oid}, {
+            "$set": {
+                "clinic_name":    payload.get("clinic"),
+                "clinic_address": payload.get("address"),
+                "clinic_phone":   payload.get("phone"),
+            },
+            **base_update,
+        }, upsert=True)
+        return
+
+    if kind == "CallStarted":
+        coll.update_one({"outreach_id": oid}, {
+            "$set":  {"call_sid": payload.get("call_sid")},
+            **base_update,
+        }, upsert=True)
+        return
+
+    if kind == "LanguageDetected":
+        detected = payload.get("language")
+        attempt = coll.find_one({"outreach_id": oid}, {"language_request": 1})
+        match = (attempt or {}).get("language_request") == detected
+        coll.update_one({"outreach_id": oid}, {
+            "$set": {
+                "language_detected": detected,
+                "language_match":    match,
+                "language_latency_ms": payload.get("latency_ms"),
+            },
+            **base_update,
+        }, upsert=True)
+        return
+
+    if kind == "BookingResult":
+        outcome = payload.get("outcome") or "in_progress"
+        update = {
+            "$set": {
+                "outcome":       outcome,
+                "ended_at":      datetime.fromisoformat(received_at.replace("Z", "+00:00")) if received_at else datetime.now(timezone.utc),
+                "booking_when":  payload.get("when"),
+                "booking_notes": payload.get("notes"),
+            },
+            **base_update,
+        }
+        coll.update_one({"outreach_id": oid}, update, upsert=True)
+
+        # Recompute the AI summary from the current state
+        latest = coll.find_one({"outreach_id": oid})
+        if latest:
+            coll.update_one(
+                {"outreach_id": oid},
+                {"$set": {"ai_summary": _summarize(latest)}},
+            )
 
 
 # ── existing telemetry bus ────────────────────────────────────────────
@@ -241,6 +375,63 @@ def list_documents(patient_id: str):
             "uploaded_at":  d["uploaded_at"].isoformat() if d.get("uploaded_at") else None,
         })
     return out
+
+
+# ── outreach summary ─────────────────────────────────────────────────
+
+@app.get("/outreach/stats")
+def outreach_stats():
+    db, _ = _mongo()
+    pipe = [{"$group": {"_id": "$outcome", "n": {"$sum": 1}}}]
+    by_outcome = {row["_id"] or "unknown": row["n"] for row in db.outreach_attempts.aggregate(pipe)}
+    total = db.outreach_attempts.count_documents({})
+    return {
+        "total":             total,
+        "booked":            by_outcome.get("booked", 0),
+        "no_answer":         by_outcome.get("no_answer", 0),
+        "language_mismatch": by_outcome.get("language_mismatch", 0),
+        "failed":            by_outcome.get("failed", 0),
+        "in_progress":       by_outcome.get("in_progress", 0),
+        "by_outcome":        by_outcome,
+    }
+
+
+@app.get("/outreach")
+def outreach_list(limit: int = 50, patient_id: Optional[str] = None):
+    db, _ = _mongo()
+    q: dict = {}
+    if patient_id:
+        q["patient_id"] = patient_id
+    rows = list(
+        db.outreach_attempts.find(q, {"events": 0})
+        .sort("started_at", -1)
+        .limit(max(1, min(limit, 200)))
+    )
+    out = []
+    for r in rows:
+        r["_id"] = str(r["_id"])
+        for k in ("started_at", "ended_at"):
+            if r.get(k):
+                r[k] = r[k].isoformat()
+        if not r.get("ai_summary"):
+            r["ai_summary"] = _summarize(r)
+        out.append(r)
+    return out
+
+
+@app.get("/outreach/{outreach_id}")
+def outreach_detail(outreach_id: str):
+    db, _ = _mongo()
+    r = db.outreach_attempts.find_one({"outreach_id": outreach_id})
+    if not r:
+        raise HTTPException(status_code=404, detail="outreach not found")
+    r["_id"] = str(r["_id"])
+    for k in ("started_at", "ended_at"):
+        if r.get(k):
+            r[k] = r[k].isoformat()
+    if not r.get("ai_summary"):
+        r["ai_summary"] = _summarize(r)
+    return r
 
 
 @app.get("/document/{doc_id}")
