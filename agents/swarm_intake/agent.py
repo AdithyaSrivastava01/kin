@@ -70,6 +70,11 @@ def _parse_requirements(request_text: str, profile: dict) -> dict:
     reqs["insurance"] = profile.get("insurance")
     reqs["language"]  = profile.get("language", "English")
 
+    # If the LLM didn't extract a specific problem, fall back to the raw
+    # request text so the caller never uses stored diagnoses as the reason.
+    if not reqs.get("problem") and request_text:
+        reqs["problem"] = request_text[:120].strip()
+
     # If the request mentions a name that differs from the profile name,
     # preserve it so swarm-caller uses it on the phone (not the demo persona name).
     if profile.get("_caller_name"):

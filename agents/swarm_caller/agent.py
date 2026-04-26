@@ -76,7 +76,7 @@ def _call_one(
         "patient_name": call_name,
         "patient_id": patient.get("patient_id"),
         "specialty": patient.get("specialty"),
-        "problem": requirements.get("problem") or _profile_problem(patient),
+        "problem": requirements.get("problem") or "general consultation",
         "insurance": patient.get("insurance"),
         "tests_needed": requirements.get("tests_needed") or "none",
         "time_pref": requirements.get("time_pref"),
