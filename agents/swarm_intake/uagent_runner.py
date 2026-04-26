@@ -281,6 +281,7 @@ def _format_confirmation_prompt(result: dict) -> str:
     phone = result.get("phone", "N/A")
     summary = result.get("call_summary", "")
     key_facts = result.get("winner_key_facts", [])
+    reqs = result.get("requirements", {})
 
     lines = [
         f"Availability found for {name}!",
@@ -293,6 +294,26 @@ def _format_confirmation_prompt(result: dict) -> str:
         lines.append("Available slots:")
         for f in key_facts[:3]:
             lines.append(f"  • {f}")
+
+    # Show the context that was passed to the ElevenLabs calling agent
+    ctx_lines = []
+    if result.get("specialty"):
+        ctx_lines.append(f"  Specialty:  {result['specialty']}")
+    if reqs.get("problem"):
+        ctx_lines.append(f"  Problem:    {reqs['problem']}")
+    if reqs.get("insurance"):
+        ctx_lines.append(f"  Insurance:  {reqs['insurance']}")
+    if reqs.get("language") and reqs["language"].lower() != "english":
+        ctx_lines.append(f"  Language:   {reqs['language']}")
+    if reqs.get("tests_needed") and reqs["tests_needed"].lower() != "none":
+        ctx_lines.append(f"  Tests:      {reqs['tests_needed']}")
+    if reqs.get("time_pref"):
+        ctx_lines.append(f"  Time pref:  {reqs['time_pref']}")
+    if ctx_lines:
+        lines.append("")
+        lines.append("Context sent to the clinic:")
+        lines.extend(ctx_lines)
+
     lines.append("")
     lines.append("Reply 'confirm' to book this appointment, or ask for a different clinic.")
     return "\n".join(lines)
