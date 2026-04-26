@@ -33,7 +33,9 @@ load_dotenv()
 
 RELAY = os.getenv("TELEMETRY_RELAY_URL", "http://localhost:3001/telemetry")
 RELAY_BASE = RELAY.rsplit("/telemetry", 1)[0]
-GATEWAY = os.getenv("NGROK_URL", "").rstrip("/")
+# Talk to the local gateway directly — ngrok is only needed by Twilio
+# (to reach the gateway from the public internet), not by this script.
+GATEWAY = os.getenv("VOICE_GATEWAY_URL", "http://localhost:8000").rstrip("/")
 
 PATIENT_LANG = {
     "joon-001":  "Korean",
@@ -88,8 +90,15 @@ def run_real_call(to_number: str, patient_lang: str, patient_name: str, specialt
     Beacons (CallStarted, LanguageDetected, BookingResult) come from the
     voice_gateway side, not from us — we just kick it off.
     """
-    if not GATEWAY:
-        raise SystemExit("NGROK_URL not set — cannot place real call")
+    try:
+        h = requests.get(f"{GATEWAY}/health", timeout=3)
+        if h.status_code != 200:
+            raise SystemExit(f"voice_gateway /health returned {h.status_code}")
+    except Exception as e:
+        raise SystemExit(
+            f"voice_gateway not reachable at {GATEWAY} ({e!r})\n"
+            "Start it with: python -m uvicorn voice_gateway.main:app --port 8000"
+        )
     payload = {
         "to": to_number,
         "language": patient_lang,
