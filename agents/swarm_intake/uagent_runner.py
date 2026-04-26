@@ -257,6 +257,12 @@ async def handle_booking_request(ctx: Context, sender: str, msg: BookingRequest)
 import json as _json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
+
+class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """HTTP bridge that handles each request in its own thread so a long
+    swarm run (30-150s) never blocks the next incoming message."""
+    daemon_threads = True
 
 # Pending bookings keyed by patient_id: store winner + fingerprint + requirements
 _PENDING_BOOKINGS: dict = {}
@@ -433,7 +439,7 @@ class _BookingHandler(BaseHTTPRequestHandler):
 
 def _start_bridge():
     port = int(os.getenv("OMEGACLAW_BRIDGE_PORT", "8015"))
-    server = HTTPServer(("0.0.0.0", port), _BookingHandler)
+    server = _ThreadingHTTPServer(("0.0.0.0", port), _BookingHandler)
     print(f"[bridge] Booking bridge listening on :{port}")
     server.serve_forever()
 
