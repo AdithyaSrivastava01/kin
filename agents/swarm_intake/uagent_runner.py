@@ -58,6 +58,10 @@ def _extract_caller_name(text: str) -> str | None:
     real name on the call instead of the fallback persona name.
     """
     import re
+    # OmegaClaw prepends Telegram username: "Adi: Hi I am having..."
+    m = re.match(r"^([A-Z][a-z]+):\s", text)
+    if m:
+        return m.group(1)
     # Look for "for <Name>" or "I am <Name>" or "my name is <Name>"
     patterns = [
         r"\bfor\s+([A-Z][a-z]+)\b",
@@ -69,7 +73,7 @@ def _extract_caller_name(text: str) -> str | None:
         if m:
             return m.group(1)
     # First capitalised word that isn't a common English word
-    common = {"Book", "Find", "Need", "Want", "Male", "Female", "The", "Please", "Help"}
+    common = {"Book", "Find", "Need", "Want", "Male", "Female", "The", "Please", "Help", "Hi", "Hello", "Hey"}
     for word in text.split():
         clean = re.sub(r"[^A-Za-z]", "", word)
         if clean and clean[0].isupper() and clean not in common and len(clean) > 2:
@@ -256,11 +260,84 @@ async def handle_booking_request(ctx: Context, sender: str, msg: BookingRequest)
 
 import json as _json
 import threading
+import urllib.request as _urlreq
+import urllib.parse as _urlparse
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
+
+class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """HTTP bridge that handles each request in its own thread so a long
+    swarm run (30-150s) never blocks the next incoming message."""
+    daemon_threads = True
 
 # Pending bookings keyed by patient_id: store winner + fingerprint + requirements
 _PENDING_BOOKINGS: dict = {}
 _PENDING_LOCK = threading.Lock()
+
+# Hardcoded clinics — only these two phone numbers will be called.
+_HARDCODED_CLINICS = [
+    {
+        "name": "Kindred Hospital Paramount",
+        "phone": "+1-213-272-3426",
+        "specialty": "clinic",
+        "address": "Los Angeles, CA",
+        "raw_tags": {},
+    },
+    {
+        "name": "Da Vita Nephron Medical Center",
+        "phone": "+1-213-477-5422",
+        "specialty": "clinic",
+        "address": "Los Angeles, CA",
+        "raw_tags": {},
+    },
+]
+
+# Telegram chat_id cache (looked up via getUpdates on first call)
+_TG_CHAT_ID: int | None = None
+_TG_CHAT_LOCK = threading.Lock()
+
+
+def _tg_token() -> str | None:
+    return os.environ.get("TG_BOT_TOKEN")
+
+
+def _resolve_chat_id() -> int | None:
+    """Find the most recent Telegram chat_id by calling getUpdates."""
+    global _TG_CHAT_ID
+    with _TG_CHAT_LOCK:
+        if _TG_CHAT_ID is not None:
+            return _TG_CHAT_ID
+        token = _tg_token()
+        if not token:
+            return None
+        try:
+            with _urlreq.urlopen(f"https://api.telegram.org/bot{token}/getUpdates", timeout=5) as r:
+                data = _json.loads(r.read())
+            for upd in reversed(data.get("result", [])):
+                msg = upd.get("message") or upd.get("edited_message") or {}
+                cid = (msg.get("chat") or {}).get("id")
+                if cid:
+                    _TG_CHAT_ID = cid
+                    return cid
+        except Exception as e:
+            print(f"[bridge] Telegram getUpdates failed: {e!r}")
+        return None
+
+
+def tg_push(text: str) -> None:
+    """Push a status update to the active Telegram chat (best-effort)."""
+    token = _tg_token()
+    if not token:
+        return
+    cid = _resolve_chat_id()
+    if not cid:
+        return
+    try:
+        body = _urlparse.urlencode({"chat_id": cid, "text": text, "parse_mode": "Markdown"}).encode()
+        _urlreq.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data=body, timeout=5)
+    except Exception as e:
+        print(f"[bridge] tg_push failed: {e!r}")
+
 
 # Confirmation requires an explicit short phrase — NOT just any query containing "book"
 _CONFIRM_KEYWORDS = ("confirm", "yes book it", "book it", "go ahead and book", "proceed with booking", "yes confirm", "please book")
@@ -314,6 +391,17 @@ def _format_confirmation_prompt(result: dict) -> str:
         lines.append("Context sent to the clinic:")
         lines.extend(ctx_lines)
 
+    # Show match scores for all clinics called
+    all_scores = result.get("all_scores", [])
+    if all_scores:
+        lines.append("")
+        lines.append("Clinic match scores:")
+        for s in all_scores:
+            marker = "★" if s.get("clinic") == result.get("clinic") else " "
+            score = s.get("judge_score") or s.get("match_score", 0)
+            avail = "✓" if s.get("available") else ("?" if s.get("available") is None else "✗")
+            lines.append(f"  {marker} {s['clinic']}: {score}/100 {avail}")
+
     lines.append("")
     lines.append("Reply 'confirm' to book this appointment, or ask for a different clinic.")
     return "\n".join(lines)
@@ -351,6 +439,22 @@ class _BookingHandler(BaseHTTPRequestHandler):
         try:
             payload = _json.loads(body)
             query = payload.get("query", "")
+
+            # ── /reset — flush all pending state ──────────────────────────────
+            if query.strip().lower() in ("/reset", "reset"):
+                with _PENDING_LOCK:
+                    _PENDING_BOOKINGS.clear()
+                global _TG_CHAT_ID
+                with _TG_CHAT_LOCK:
+                    _TG_CHAT_ID = None
+                reply = "✅ State flushed. Send your booking request when ready."
+                response = _json.dumps({"result": reply}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(response)
+                return
+
             patient_id, request_text = _resolve_patient(query)
 
             from pymongo import MongoClient
@@ -366,6 +470,7 @@ class _BookingHandler(BaseHTTPRequestHandler):
                 with _PENDING_LOCK:
                     _PENDING_BOOKINGS.pop(patient_id, None)
 
+                tg_push(f"📞 Calling *{pending['winner'].get('name')}* to confirm your slot...")
                 result = intake_agent.confirm_booking(
                     db,
                     patient_id=patient_id,
@@ -376,9 +481,14 @@ class _BookingHandler(BaseHTTPRequestHandler):
                 reply = _format_booked_reply(result) if not result.get("error") else _format_reply(result)
 
             else:
-                # ── Phase 1: gather availability ──────────────────────────────
+                # ── Phase 1: gather availability with hardcoded 2 clinics ─────
+                tg_push(f"🚀 Dispatching HealthSwarm for: _{request_text[:120]}_")
                 result = intake_agent.run(
-                    db, patient_id=patient_id, request_text=request_text
+                    db,
+                    patient_id=patient_id,
+                    request_text=request_text,
+                    candidates_override=_HARDCODED_CLINICS,
+                    progress_cb=tg_push,
                 )
 
                 if result.get("error"):
@@ -422,7 +532,7 @@ class _BookingHandler(BaseHTTPRequestHandler):
 
 def _start_bridge():
     port = int(os.getenv("OMEGACLAW_BRIDGE_PORT", "8015"))
-    server = HTTPServer(("0.0.0.0", port), _BookingHandler)
+    server = _ThreadingHTTPServer(("0.0.0.0", port), _BookingHandler)
     print(f"[bridge] Booking bridge listening on :{port}")
     server.serve_forever()
 

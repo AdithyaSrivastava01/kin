@@ -107,16 +107,14 @@ def rank_candidates(profile: dict, requirements: dict, candidates: list[dict]) -
 
 
 def run(patient_requirements: dict, fingerprinted: list[dict]) -> dict:
-    """Use an LLM as judge to pick the best clinic from fingerprinted call summaries.
+    """Judge fingerprinted call results and pick the best clinic.
 
-    patient_requirements — booking preferences extracted by swarm-intake
-                           (specialty, insurance, time_pref, urgency, ...)
+    patient_requirements — booking preferences from swarm-intake
     fingerprinted        — list of fingerprint dicts from swarm-fingerprint,
                            each with: clinic_name, available, insurance_accepted,
-                           wait_time, key_facts, summary, clinic (raw dict)
+                           wait_time, key_facts, summary, match_score, clinic
 
-    Returns the winning clinic dict (with rationale injected) and emits
-    a ClinicMatched beacon.
+    Returns the winning clinic dict with rationale and all clinic scores injected.
     """
     if not fingerprinted:
         beacon("swarm-matcher", "swarm-intake", "ClinicMatched", {"error": "no candidates"})
@@ -126,14 +124,17 @@ def run(patient_requirements: dict, fingerprinted: list[dict]) -> dict:
         f"- {k}: {v}" for k, v in patient_requirements.items() if v
     ) or "No specific requirements."
 
+    # Build clinic block including match_score from fingerprint for the judge
     clinics_block = ""
     for i, fp in enumerate(fingerprinted, 1):
         clinics_block += (
             f"\n{i}. {fp.get('clinic_name')}\n"
-            f"   Available: {fp.get('available')}\n"
+            f"   Available:         {fp.get('available')}\n"
             f"   Insurance accepted: {fp.get('insurance_accepted')}\n"
-            f"   Wait time: {fp.get('wait_time')}\n"
-            f"   Summary: {fp.get('summary')}\n"
+            f"   Wait time:         {fp.get('wait_time')}\n"
+            f"   Match score:       {fp.get('match_score', 0)}/100\n"
+            f"   Language:          {fp.get('language', 'Unknown')}\n"
+            f"   Summary:           {fp.get('summary')}\n"
         )
         for fact in fp.get("key_facts", []):
             clinics_block += f"   • {fact}\n"
@@ -141,12 +142,14 @@ def run(patient_requirements: dict, fingerprinted: list[dict]) -> dict:
     raw = asi_chat(
         system=(
             "You are a medical scheduling judge. "
-            "Given a patient's requirements and summaries of inquiry calls to clinics, "
-            "pick the single best clinic. "
+            "Given a patient's requirements and fingerprinted call summaries "
+            "(each with a match_score 0-100 from the call analyst), "
+            "pick the single best clinic. Weigh availability, insurance, "
+            "language match, and the analyst's match_score. "
             "Reply with ONLY valid JSON — no prose, no markdown:\n"
             '{"winner": "<exact clinic name>", '
             '"rationale": "<one sentence why>", '
-            '"rank": ["<name>", ...]}'
+            '"scores": {"<clinic name>": <0-100>, ...}}'
         ),
         user=(
             f"Patient requirements:\n{requirements_text}\n\n"
@@ -160,22 +163,47 @@ def run(patient_requirements: dict, fingerprinted: list[dict]) -> dict:
         parsed = json.loads(raw)
         winner_name = parsed.get("winner", "")
         rationale   = parsed.get("rationale", "")
+        judge_scores = parsed.get("scores", {})
     except (json.JSONDecodeError, ValueError):
-        winner_name = fingerprinted[0].get("clinic_name", "")
-        rationale   = raw.strip()
+        winner_name  = fingerprinted[0].get("clinic_name", "")
+        rationale    = raw.strip()
+        judge_scores = {}
+
+    # Merge judge scores back onto fingerprints
+    for fp in fingerprinted:
+        name = fp.get("clinic_name", "")
+        if name in judge_scores:
+            fp["judge_score"] = int(judge_scores[name])
 
     winner_fp = next(
         (fp for fp in fingerprinted if fp.get("clinic_name") == winner_name),
         fingerprinted[0],
     )
     winner = dict(winner_fp.get("clinic", {}))
-    winner["rationale"] = rationale
+    winner["rationale"]   = rationale
+    winner["match_score"] = winner_fp.get("match_score", 0)
+    winner["judge_score"] = winner_fp.get("judge_score", winner_fp.get("match_score", 0))
+
+    # Attach all clinic scores to winner for Telegram/dashboard display
+    winner["all_scores"] = [
+        {
+            "clinic":      fp.get("clinic_name"),
+            "match_score": fp.get("match_score", 0),
+            "judge_score": fp.get("judge_score", fp.get("match_score", 0)),
+            "available":   fp.get("available"),
+            "language":    fp.get("language"),
+            "summary":     fp.get("summary"),
+        }
+        for fp in fingerprinted
+    ]
 
     beacon("swarm-matcher", "swarm-intake", "ClinicMatched", {
-        "clinic":   winner.get("name"),
-        "address":  winner.get("address"),
-        "phone":    winner.get("phone") or DEMO_PHONE_FALLBACK,
-        "rationale": rationale,
+        "clinic":      winner.get("name"),
+        "address":     winner.get("address"),
+        "phone":       winner.get("phone") or DEMO_PHONE_FALLBACK,
+        "rationale":   rationale,
+        "match_score": winner.get("match_score"),
+        "all_scores":  winner["all_scores"],
     })
 
     return winner
