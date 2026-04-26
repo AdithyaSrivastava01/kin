@@ -25,7 +25,7 @@ from pymongo import MongoClient
 
 load_dotenv()
 
-MODEL_VERSION = "asi1-extended-2026-q1"
+MODEL_VERSION = "asi1-2026-q1"
 
 
 def _mongo_kwargs(uri: str | None) -> dict:
@@ -136,7 +136,7 @@ def _ask_asi1(patient: dict) -> dict | None:
             f"  insurance: {patient.get('insurance_id')} ({patient.get('insurance_plan')})\n"
         )
         r = client.chat.completions.create(
-            model="asi1-extended",
+            model="asi1",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user",   "content": user_msg},
@@ -185,7 +185,7 @@ def generate_medical_record(patient_id: str, *, force: bool = False) -> dict[str
         raise ValueError(f"patient {patient_id!r} not found in patients collection")
 
     body = _ask_asi1(patient)
-    generated_by = "asi1-extended"
+    generated_by = "asi1"
     if body is None:
         body = _stub_record(patient)
         generated_by = "stub"
@@ -194,7 +194,7 @@ def generate_medical_record(patient_id: str, *, force: bool = False) -> dict[str
         "patient_id":    patient_id,
         "generated_by":  generated_by,
         "generated_at":  datetime.now(timezone.utc),
-        "model_version": MODEL_VERSION if generated_by == "asi1-extended" else "stub-v1",
+        "model_version": MODEL_VERSION if generated_by == "asi1" else "stub-v1",
         **body,
     }
     db["medical_records"].replace_one(
