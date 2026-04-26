@@ -27,6 +27,14 @@ load_dotenv()
 
 MODEL_VERSION = "asi1-2026-q1"
 
+
+def _mongo_kwargs(uri: str | None) -> dict:
+    """Use TLS only for Atlas-style URIs, not local Docker Mongo."""
+    kwargs = {"serverSelectionTimeoutMS": 8000}
+    if uri and uri.startswith("mongodb+srv://"):
+        kwargs["tlsCAFile"] = certifi.where()
+    return kwargs
+
 SYSTEM_PROMPT = """\
 You generate realistic but synthetic medical history for a fictional patient
 in a demo healthcare app. NEVER recommend real treatments or claim accuracy.
@@ -164,11 +172,8 @@ def generate_medical_record(patient_id: str, *, force: bool = False) -> dict[str
     - Otherwise calls ASI:One; on failure falls back to a deterministic stub.
     - Writes the result to the medical_records collection (upsert).
     """
-    db = MongoClient(
-        os.getenv("MONGO_URI"),
-        tlsCAFile=certifi.where(),
-        serverSelectionTimeoutMS=8000,
-    )["healthswarm"]
+    uri = os.getenv("MONGO_URI")
+    db = MongoClient(uri, **_mongo_kwargs(uri))["healthswarm"]
 
     if not force:
         existing = db["medical_records"].find_one({"patient_id": patient_id})

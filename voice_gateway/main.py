@@ -174,6 +174,9 @@ def initiate_call(
     insurance: str | None = None,
     time_pref: str | None = None,
     clinic_name: str | None = None,
+    allergies: list | None = None,
+    diagnoses: list | None = None,
+    medications: list | None = None,
 ) -> str:
     """Place an outbound call via Twilio. Returns the call SID."""
     # Sanitize patient_lang to prevent TwiML injection — allow only letters/spaces
@@ -202,6 +205,9 @@ def initiate_call(
         "time_pref": time_pref,
         "clinic_name": clinic_name,
         "clinic_phone": to_number,
+        "allergies": allergies or [],
+        "diagnoses": diagnoses or [],
+        "medications": medications or [],
     }
     return call.sid
 
@@ -287,6 +293,9 @@ async def call_endpoint(req: Request):
         insurance=body.get("insurance"),
         time_pref=body.get("time_pref"),
         clinic_name=body.get("clinic_name"),
+        allergies=body.get("allergies", []),
+        diagnoses=body.get("diagnoses", []),
+        medications=body.get("medications", []),
     )
     return {"call_sid": sid, "status": "initiated"}
 
@@ -591,6 +600,9 @@ async def _detect_and_respond(
         specialty=ctx.get("specialty", "a doctor"),
         insurance=ctx.get("insurance", "private"),
         time_pref=ctx.get("time_pref", "this week"),
+        allergies=ctx.get("allergies", []),
+        diagnoses=ctx.get("diagnoses", []),
+        medications=ctx.get("medications", []),
     )
     state["phase"] = "conversing"
     print(f"[convo] entering conversation loop (lang={language})")

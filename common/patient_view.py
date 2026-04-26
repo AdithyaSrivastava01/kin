@@ -31,11 +31,17 @@ def get_patient_view(db, patient_id: str) -> dict:
     if not p:
         return {}
 
+    legacy_insurance = p.get("insurance") or {}
     insurance_id = p.get("insurance_id")
+    if not insurance_id and legacy_insurance.get("provider"):
+        insurance_id = legacy_insurance["provider"].lower().replace(" ", "-")
     insurer = db.insurance_companies.find_one({"insurance_id": insurance_id}) or {}
 
     # Get-or-generate the AI medical record. Cached after first call.
-    med = generate_medical_record(patient_id)
+    try:
+        med = generate_medical_record(patient_id)
+    except Exception:
+        med = {}
 
     return {
         "patient_id":     patient_id,
@@ -43,13 +49,14 @@ def get_patient_view(db, patient_id: str) -> dict:
         "age":            p.get("age"),
         "language":       p.get("primary_language", "English"),
         "insurance_id":   insurance_id,
-        "insurance":      insurer.get("name", insurance_id),     # display name e.g. "Aetna"
-        "insurance_plan": p.get("insurance_plan"),
+        "insurance":      insurer.get("name") or legacy_insurance.get("provider") or insurance_id,
+        "insurance_plan": p.get("insurance_plan") or legacy_insurance.get("plan"),
         "insurer":        insurer,                                # full doc for callers that want copay, states, prior_auth
         "location":       p["location"],
-        "allergies":      med.get("allergies", []),
-        "medications":    [m["name"] for m in med.get("medications", [])],
-        "diagnoses":      med.get("diagnoses", []),
+        "allergies":      med.get("allergies") or p.get("allergies", []),
+        "medications":    [m["name"] if isinstance(m, dict) else m for m in (med.get("medications") or p.get("medications", []))],
+        "diagnoses":      med.get("diagnoses") or p.get("diagnoses", []),
+        "prior_providers": med.get("prior_providers") or p.get("prior_providers", []),
         "ai_notes":       (med.get("ai_notes") or "")[:200],
         "generated_by":   med.get("generated_by"),
         "model_version":  med.get("model_version"),

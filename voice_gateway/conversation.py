@@ -19,9 +19,13 @@ Patient context:
 - Specialty needed: {specialty}
 - Insurance: {insurance}
 - Preferred time: {time_pref}
+- Known allergies: {allergies}
+- Active diagnoses: {diagnoses}
+- Current medications: {medications}
 
 Rules:
-1. Answer receptionist questions naturally (DOB, insurance ID, etc.). \
+1. Answer receptionist questions naturally (DOB, insurance ID, allergies, \
+   current medications, etc.) using the patient context above. \
    If you don't have the info, say "I'll need to check with the patient \
    and call back."
 2. If asked to hold, say "Of course, I'll hold."
@@ -47,11 +51,17 @@ class ConversationState:
         specialty: str = "a doctor",
         insurance: str = "private",
         time_pref: str = "this week",
+        allergies: list | None = None,
+        diagnoses: list | None = None,
+        medications: list | None = None,
     ):
         self.patient_name = patient_name
         self.specialty = specialty
         self.insurance = insurance
         self.time_pref = time_pref
+        self.allergies = allergies or []
+        self.diagnoses = diagnoses or []
+        self.medications = medications or []
         self.history: list[dict] = []
         self.booking_status: str = "in_progress"
         self.turns: int = 0
@@ -63,6 +73,9 @@ class ConversationState:
             specialty=self.specialty,
             insurance=self.insurance,
             time_pref=self.time_pref,
+            allergies=", ".join(self.allergies) if self.allergies else "none known",
+            diagnoses=", ".join(self.diagnoses) if self.diagnoses else "none provided",
+            medications=", ".join(self.medications) if self.medications else "none provided",
         )
 
     def next_response(self, receptionist_said: str) -> str:

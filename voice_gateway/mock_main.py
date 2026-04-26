@@ -27,7 +27,7 @@ async def get_transcript(call_sid: str):
     if not call:
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    clinic_name = call.get("to", "the clinic")
+    clinic_name = call.get("clinic_name") or call.get("to", "the clinic")
     language = call.get("language", "English")
     patient_name = call.get("patient_name", "the patient")
     specialty = call.get("specialty", "general")
@@ -35,10 +35,21 @@ async def get_transcript(call_sid: str):
     insurance_provider = (
         insurance.get("provider", "their insurance") if isinstance(insurance, dict) else str(insurance)
     )
+    allergies: list = call.get("allergies", [])
+    diagnoses: list = call.get("diagnoses", [])
+    medications: list = call.get("medications", [])
+
+    allergy_line = (
+        f"Please note the patient has allergies to {', '.join(allergies)}."
+        if allergies else ""
+    )
 
     transcript = [
         {"role": "receptionist", "text": f"Thank you for calling {clinic_name}. How can I help you?"},
-        {"role": "assistant", "text": f"Hi, I'm calling to book a {specialty} appointment for {patient_name}."},
+        {"role": "assistant", "text": (
+            f"Hi, I'm calling to book a {specialty} appointment for {patient_name}. "
+            f"{allergy_line}".strip()
+        )},
         {"role": "receptionist", "text": f"Of course! We accept {insurance_provider}. We have availability this week."},
         {"role": "assistant", "text": "What's the earliest available slot?"},
         {"role": "receptionist", "text": "We have tomorrow at 10 AM or Thursday at 2 PM. Which works?"},

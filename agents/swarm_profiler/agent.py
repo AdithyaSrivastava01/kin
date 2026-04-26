@@ -5,6 +5,7 @@
 # + medical_records into a single flat dict.
 from common.patient_view import get_patient_view
 from common.telemetry import beacon
+from common.patient_cache import put as cache_put
 
 
 def run(db, patient_id: str) -> dict:
@@ -20,6 +21,8 @@ def run(db, patient_id: str) -> dict:
             "reason": "not_found",
         })
         return {"error": "PROFILE_NOT_FOUND", "patient_id": patient_id}
+
+    cache_put(patient_id, profile)
 
     beacon("swarm-profiler", "swarm-intake", "ProfileLoaded", {
         "name":         profile["name"],

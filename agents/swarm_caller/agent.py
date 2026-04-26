@@ -65,6 +65,9 @@ def _call_one(
                 "insurance": patient.get("insurance"),
                 "time_pref": requirements.get("time_pref"),
                 "clinic_name": clinic.get("name"),
+                "allergies": patient.get("allergies", []),
+                "diagnoses": patient.get("diagnoses", []),
+                "medications": patient.get("medications", []),
             },
             timeout=VOICE_GW_TIMEOUT,
         )
