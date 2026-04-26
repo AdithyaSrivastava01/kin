@@ -6,6 +6,13 @@
 
 set -euo pipefail
 
+# Stop Git Bash / MSYS from rewriting in-container paths like /PeTTa
+# into Windows host paths like C:/Program Files/Git/PeTTa before
+# docker exec sees them. Without this every find inside the container
+# silently returns nothing and the skill injection step hangs.
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL="*"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"   # resolves to kin/
 ENV_FILE="$SCRIPT_DIR/.env"
 SKILL_PY="$SCRIPT_DIR/healthswarm-omegaclaw-skill/agentverse/healthswarm_skill.py"
@@ -95,7 +102,15 @@ if [ -z "$AGENTVERSE_DIR" ]; then
 fi
 
 echo "    target: omegaclaw:$AGENTVERSE_DIR/healthswarm_skill.py"
-docker cp "$SKILL_PY" "omegaclaw:$AGENTVERSE_DIR/healthswarm_skill.py"
+# On Git Bash / MSYS the Docker CLI needs a Windows-style host path
+# because we disabled MSYS path conversion above. cygpath handles it
+# on Windows and is a no-op (graceful fallback) on Linux/macOS.
+if command -v cygpath >/dev/null 2>&1; then
+  SKILL_PY_HOST="$(cygpath -w "$SKILL_PY")"
+else
+  SKILL_PY_HOST="$SKILL_PY"
+fi
+docker cp "$SKILL_PY_HOST" "omegaclaw:$AGENTVERSE_DIR/healthswarm_skill.py"
 
 # ── Step 6: patch skills.metta ───────────────────────────────────────────────
 echo ""
