@@ -99,6 +99,7 @@ const KIND_COLOR: Record<string, string> = {
   ProfileLoaded:    "#8b5cf6",
   CandidatesFound:  "#10b981",
   ClinicMatched:    "#f59e0b",
+  ClinicRanked:     "#f59e0b",
 };
 const DEFAULT_EDGE_COLOR = "#22c55e";
 
@@ -106,9 +107,13 @@ const EDGE_TTL_MS = 4000;
 
 type Tab = "outreach" | "live";
 
+const clinicId = (name: string) =>
+  `clinic-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+
 export default function Dashboard() {
   const [tab, setTab] = useState<Tab>("outreach");
   const [edges, setEdges] = useState<Edge[]>([]);
+  const [candidateNodes, setCandidateNodes] = useState<Node[]>([]);
   const [feed, setFeed] = useState<Beacon[]>([]);
   const [langAlert, setLangAlert] = useState<string | null>(null);
   const [status, setStatus] = useState<"connecting" | "live" | "disconnected">("connecting");
@@ -136,6 +141,23 @@ export default function Dashboard() {
         const isLive = age < 5000;
 
         if (isLive) {
+          if (evt.kind === "CandidatesFound") {
+            const names = ((evt.payload as { top?: string[] })?.top ?? []).slice(0, 5);
+            setCandidateNodes(names.map((name, i) => ({
+              id: clinicId(name),
+              position: { x: 110 + i * 175, y: 515 },
+              data: { label: name },
+              style: {
+                ...nodeStyle("#475569"),
+                width: 155,
+                padding: "10px 12px",
+                fontSize: 12,
+                borderStyle: "dashed",
+                color: "#cbd5e1",
+              },
+            })));
+          }
+
           counter.current += 1;
           const id = `e-${counter.current}`;
           const color = KIND_COLOR[evt.kind] ?? DEFAULT_EDGE_COLOR;
@@ -162,6 +184,26 @@ export default function Dashboard() {
             setLangAlert(`🌐 ${lang} detected — switching voice`);
             setTimeout(() => setLangAlert(null), 6000);
           }
+
+          if (evt.kind === "ClinicRanked") {
+            const top = ((evt.payload as { top?: Array<{ name?: string; score?: number }> })?.top ?? []).slice(0, 5);
+            const rankedEdges: Edge[] = top
+              .filter((c) => c.name)
+              .map((c, i) => ({
+                id: `rank-${counter.current}-${i}`,
+                source: "swarm-matcher",
+                target: clinicId(c.name as string),
+                animated: true,
+                label: `${c.score ?? "?"}/100`,
+                style: { stroke: "#f59e0b", strokeWidth: 2 },
+                labelStyle: { fill: "#f1f5f9", fontSize: 12, fontWeight: 700 },
+                markerEnd: { type: MarkerType.ArrowClosed, color: "#f59e0b" },
+              }));
+            setEdges((prev) => [...prev.slice(-30), ...rankedEdges]);
+            setTimeout(() => {
+              setEdges((prev) => prev.filter((e) => !rankedEdges.some((r) => r.id === e.id)));
+            }, EDGE_TTL_MS);
+          }
         }
 
         setFeed((f) => [evt, ...f].slice(0, 60));
@@ -174,6 +216,8 @@ export default function Dashboard() {
       es?.close();
     };
   }, []);
+
+  const nodes = useMemo(() => [...baseNodes, ...candidateNodes], [candidateNodes]);
 
   const statusBadge = useMemo(() => {
     if (status === "live") return { color: "bg-emerald-500", text: "LIVE" };

@@ -5,9 +5,7 @@ discovered and messaged through Agentverse / ASI:One.
 Usage (from kin/):
   ../.venv/bin/python -m agents.swarm_intake.uagent_runner
 """
-import json
 import os
-import sys
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -20,7 +18,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 # Python 3.10+ no longer auto-creates an event loop; uagents needs one up-front
 asyncio.set_event_loop(asyncio.new_event_loop())
 
-from uagents import Agent, Context, Protocol
+from uagents import Agent, Context, Model, Protocol
 from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement,
     ChatMessage,
@@ -40,6 +38,55 @@ agent = Agent(
 
 protocol = Protocol(spec=chat_protocol_spec)
 
+_PERSONA_MAP = {
+    "maria": "maria-001",
+    "joon":  "joon-001",
+    "rahul": "rahul-001",
+}
+
+
+def _resolve_patient(text: str) -> tuple[str, str]:
+    """Return (patient_id, request_text).
+    Priority: explicit patient_id= token > demo first name > default P001.
+    """
+    for token in text.split():
+        if token.startswith("patient_id="):
+            pid = token.split("=", 1)[1]
+            return pid, text.replace(token, "").strip()
+    lower = text.lower()
+    for name, pid in _PERSONA_MAP.items():
+        if name in lower:
+            return pid, text
+    return "P001", text
+
+
+def _format_reply(result: dict) -> str:
+    if "error" in result:
+        return f"Sorry, I couldn't complete the booking: {result['error']}"
+    lines = [
+        f"Booking complete for {result.get('patient_name', 'your patient')}!",
+        f"Clinic:    {result.get('clinic', 'N/A')}",
+        f"Phone:     {result.get('phone', 'N/A')}",
+        f"Language:  {result.get('language', 'English')}",
+    ]
+    if result.get("rationale"):
+        rationale = result["rationale"]
+        # Strip markdown code fences and JSON blobs from the rationale
+        if rationale.startswith("```") or rationale.startswith("{"):
+            rationale = "Appointment confirmed based on availability and insurance match"
+        lines.append(f"Why:       {rationale}")
+    if result.get("match_score") is not None and result["match_score"] > 0:
+        lines.append(f"Score:     {result['match_score']}/100")
+    if result.get("attempts"):
+        lines.append(f"Attempts:  {result['attempts']}")
+    call_summary = result.get("call_summary", "")
+    if call_summary and not call_summary.startswith("{") and not call_summary.startswith("```"):
+        lines.append(f"Call:      {call_summary}")
+    reqs = result.get("requirements", {})
+    if reqs.get("time_pref"):
+        lines.append(f"Time pref: {reqs['time_pref']}")
+    return "\n".join(lines)
+
 
 @protocol.on_message(ChatMessage)
 async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
@@ -58,22 +105,32 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
 
     ctx.logger.info(f"[swarm-intake] received: {text[:120]}")
 
+    patient_id, request_text = _resolve_patient(text)
+
+    # Send a progress message before the 30-90s blocking swarm run
+    await ctx.send(
+        sender,
+        ChatMessage(
+            timestamp=datetime.now(timezone.utc),
+            msg_id=uuid4(),
+            content=[TextContent(
+                type="text",
+                text=(
+                    f"Dispatching HealthSwarm agents for patient {patient_id} "
+                    "(profiler, finder, caller, matcher)... "
+                    "This takes 30-90 seconds."
+                ),
+            )],
+        ),
+    )
+
     try:
         from pymongo import MongoClient
         from agents.swarm_intake import agent as intake_agent
 
         db = MongoClient(os.environ["MONGO_URI"]).get_default_database()
-        # Accept "patient_id=P001 ..." or fall back to demo patient
-        patient_id = "P001"
-        request_text = text
-        for token in text.split():
-            if token.startswith("patient_id="):
-                patient_id = token.split("=", 1)[1]
-                request_text = text.replace(token, "").strip()
-                break
-
         result = intake_agent.run(db, patient_id=patient_id, request_text=request_text)
-        reply = json.dumps(result, indent=2)
+        reply = _format_reply(result)
     except Exception as exc:
         ctx.logger.exception("swarm-intake error")
         reply = f"Error: {exc}"
@@ -98,5 +155,88 @@ async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
 
 agent.include(protocol, publish_manifest=True)
 
+
+# ── OmegaClaw direct-call protocol ──────────────────────────────────────────
+# OmegaClaw uses send_sync_message which returns on the first reply. The Chat
+# Protocol handler above sends an ACK + progress message before the result,
+# which would be captured instead. This separate request/response pair gives
+# OmegaClaw a clean single round-trip with a long timeout.
+
+class BookingRequest(Model):
+    query: str
+
+class BookingResponse(Model):
+    result: str
+
+@agent.on_message(BookingRequest, replies={BookingResponse})
+async def handle_booking_request(ctx: Context, sender: str, msg: BookingRequest):
+    patient_id, request_text = _resolve_patient(msg.query)
+    ctx.logger.info(f"[swarm-intake] OmegaClaw booking: patient={patient_id}")
+    try:
+        from pymongo import MongoClient
+        from agents.swarm_intake import agent as intake_agent
+
+        db = MongoClient(os.environ["MONGO_URI"]).get_default_database()
+        result = intake_agent.run(db, patient_id=patient_id, request_text=request_text)
+        reply = _format_reply(result)
+    except Exception as exc:
+        ctx.logger.exception("swarm-intake OmegaClaw booking error")
+        reply = f"Error: {exc}"
+    await ctx.send(sender, BookingResponse(result=reply))
+
+
+# ── HTTP booking bridge ─────────────────────────────────────────────────────
+# Docker containers reach this via http://host.docker.internal:$PORT/book.
+# Bypasses uAgents envelope version issues between OmegaClaw and the host.
+
+import json as _json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+class _BookingHandler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):  # silence access log
+        pass
+
+    def do_POST(self):
+        if self.path != "/book":
+            self.send_error(404)
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+        try:
+            payload = _json.loads(body)
+            query = payload.get("query", "")
+            patient_id, request_text = _resolve_patient(query)
+
+            from pymongo import MongoClient
+            from agents.swarm_intake import agent as intake_agent
+
+            db = MongoClient(os.environ["MONGO_URI"]).get_default_database()
+            result = intake_agent.run(
+                db, patient_id=patient_id, request_text=request_text
+            )
+            reply = _format_reply(result)
+            response = _json.dumps({"result": reply}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(response)
+        except Exception as exc:
+            err = _json.dumps({"error": str(exc)}).encode()
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(err)
+
+
+def _start_bridge():
+    port = int(os.getenv("OMEGACLAW_BRIDGE_PORT", "8015"))
+    server = HTTPServer(("0.0.0.0", port), _BookingHandler)
+    print(f"[bridge] Booking bridge listening on :{port}")
+    server.serve_forever()
+
+
 if __name__ == "__main__":
+    threading.Thread(target=_start_bridge, daemon=True).start()
     agent.run()

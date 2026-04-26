@@ -1,7 +1,7 @@
-"""uAgent wrapper for swarm-matcher (LLM clinic ranking judge).
+"""uAgent wrapper for swarm-caller (ranked clinic calling + fallback).
 
 Usage (from kin/):
-  ../.venv/bin/python -m agents.swarm_matcher.uagent_runner
+  PYTHONPATH=. .venv/bin/python -m agents.swarm_caller.uagent_runner
 """
 import json
 import os
@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 import asyncio
-
 from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
@@ -26,9 +25,9 @@ from uagents_core.contrib.protocols.chat import (
 )
 
 agent = Agent(
-    name="healthswarm-matcher",
-    seed=os.environ["MATCHER_SEED"],
-    port=8013,
+    name="healthswarm-caller",
+    seed=os.environ["CALLER_SEED"],
+    port=8016,
     mailbox=True,
     publish_agent_details=True,
 )
@@ -49,40 +48,20 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     text = " ".join(
         item.text for item in msg.content if isinstance(item, TextContent)
     ).strip()
-
-    ctx.logger.info(f"[swarm-matcher] received: {text[:120]}")
+    ctx.logger.info(f"[swarm-caller] received: {text[:120]}")
 
     try:
-        from agents.swarm_matcher import agent as matcher_agent
+        from agents.swarm_caller import agent as caller_agent
 
-        # Expect JSON: {"requirements": {...}, "fingerprints": [...]}
-        # or {"profile": {...}, "requirements": {...}, "candidates": [...]}
         payload = json.loads(text)
-        requirements = payload.get("requirements", {})
-        if "candidates" in payload:
-            result = matcher_agent.rank_candidates(
-                payload.get("profile", {}),
-                requirements,
-                payload.get("candidates", []),
-            )
-        else:
-            fingerprints = payload.get("fingerprints", [])
-            result = matcher_agent.run(requirements, fingerprints)
+        result = caller_agent.call_ranked(
+            payload.get("ranked_clinics", []),
+            payload.get("patient", {}),
+            payload.get("requirements", {}),
+        )
         reply = json.dumps(result, indent=2)
-    except json.JSONDecodeError:
-        # Free-text demo: treat entire message as a mock requirement
-        try:
-            from agents.swarm_matcher import agent as matcher_agent
-            mock_fp = [{"clinic_name": "Demo Clinic", "available": True,
-                        "insurance_accepted": True, "wait_time": "1 week",
-                        "key_facts": [], "summary": "Demo clinic for testing",
-                        "clinic": {"name": "Demo Clinic", "phone": "+1-555-0100"}}]
-            result = matcher_agent.run({"specialty": text}, mock_fp)
-            reply = json.dumps(result, indent=2)
-        except Exception as exc:
-            reply = f"Error: {exc}"
     except Exception as exc:
-        ctx.logger.exception("swarm-matcher error")
+        ctx.logger.exception("swarm-caller error")
         reply = f"Error: {exc}"
 
     await ctx.send(

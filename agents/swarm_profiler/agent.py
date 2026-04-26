@@ -19,7 +19,7 @@ def run(db, patient_id: str) -> dict:
             "patient_id": patient_id,
             "reason": "not_found",
         })
-        return {}
+        return {"error": "PROFILE_NOT_FOUND", "patient_id": patient_id}
 
     beacon("swarm-profiler", "swarm-intake", "ProfileLoaded", {
         "name":         profile["name"],

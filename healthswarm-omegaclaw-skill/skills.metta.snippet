@@ -1,0 +1,25 @@
+;; ─────────────────────────────────────────────────────────────────────────────
+;; HealthSwarm OmegaClaw Skill — paste these lines into src/skills.metta
+;; ─────────────────────────────────────────────────────────────────────────────
+;;
+;; STEP 1 — Add this function definition anywhere in src/skills.metta:
+
+(= (healthswarm-booking $query)
+   (py-call (agentverse.healthswarm_booking $query)))
+
+;;
+;; STEP 2 — Inside the getSkills function, add this line under the
+;;           ;AGENTVERSE AGENTS: comment (or add that comment if absent):
+;;
+;;   "- Book a medical appointment for Maria, Joon, or Rahul via HealthSwarm AI: (healthswarm-booking string_in_quotes)"
+;;
+;; Example of where it fits in getSkills:
+;;
+;; (= (getSkills)
+;;    (;INTERNAL:
+;;     ...
+;;     ;AGENTVERSE AGENTS:
+;;     "- Search the web using the Tavily Search Agent: (tavily-search string_in_quotes)"
+;;     "- Get technical stock analysis using the Technical Analysis Agent: (tech-analysis string_in_quotes)"
+;;     "- Book a medical appointment for Maria, Joon, or Rahul via HealthSwarm AI: (healthswarm-booking string_in_quotes)"
+;;     ...
