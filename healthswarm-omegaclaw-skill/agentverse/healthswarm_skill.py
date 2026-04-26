@@ -6,41 +6,31 @@ agentverse.py. OmegaClaw calls healthswarm_booking() via py-call from MeTTa.
 Usage from skills.metta:
     (= (healthswarm-booking $query)
        (py-call (agentverse.healthswarm_booking $query)))
+
+Talks to the local healthswarm-intake runner over its HTTP bridge instead
+of via Agentverse mailbox routing. This avoids hardcoding any uAgent
+address — OmegaClaw's container reaches the host through Docker's
+host.docker.internal hostname, which Docker Desktop maps automatically.
+
+Override INTAKE_BRIDGE_URL via env var if running OmegaClaw in a
+different network topology.
 """
-import asyncio
 import json
+import os
+from urllib import request as urlrequest
+from urllib.error import HTTPError, URLError
 
-from uagents import Model
-from uagents.query import send_sync_message
-
-HEALTHSWARM_INTAKE_ADDRESS = (
-    "agent1qw8ycstyjepy0646l8kmwzgzx2msv9ajmu0t5742c2kp2v5vgnehv6z2wsu"
+INTAKE_BRIDGE_URL = os.environ.get(
+    "INTAKE_BRIDGE_URL", "http://host.docker.internal:8015/book"
 )
-
-
-class BookingRequest(Model):
-    query: str
-
-
-class BookingResponse(Model):
-    result: str
-
-
-async def _ask_agent(destination: str, request: Model, timeout: int = 60) -> str:
-    envelope_or_status = await send_sync_message(
-        destination=destination,
-        message=request,
-        timeout=timeout,
-    )
-    return str(envelope_or_status)
 
 
 def healthswarm_booking(query: str, timeout: int = 180) -> str:
     """Book a medical appointment via the HealthSwarm agent swarm.
 
-    Sends a BookingRequest to healthswarm-intake and waits up to 3 minutes
-    for the 5-agent swarm (profiler, finder, caller, fingerprint, matcher)
-    to complete and return a formatted booking summary.
+    Posts the query to the intake runner's /book bridge and waits up to
+    `timeout` seconds for the 5-agent swarm to complete and return a
+    formatted booking summary.
 
     Args:
         query: Natural-language booking request, e.g.
@@ -52,17 +42,34 @@ def healthswarm_booking(query: str, timeout: int = 180) -> str:
     Returns:
         Human-readable booking result string, or "error: ..." on failure.
     """
+    payload = json.dumps({"query": query}).encode("utf-8")
+    req = urlrequest.Request(
+        INTAKE_BRIDGE_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
     try:
-        request = BookingRequest(query=query)
-        raw = asyncio.run(_ask_agent(HEALTHSWARM_INTAKE_ADDRESS, request, int(timeout)))
-        # send_sync_message returns str(envelope). Try to parse the JSON body.
+        with urlrequest.urlopen(req, timeout=int(timeout)) as resp:
+            body = resp.read().decode("utf-8")
+    except HTTPError as e:
         try:
-            data = json.loads(raw)
-            return data.get("result", raw)
-        except (json.JSONDecodeError, AttributeError, TypeError):
-            return raw
+            err = json.loads(e.read().decode("utf-8")).get("error", str(e))
+        except Exception:
+            err = str(e)
+        return f"error: intake bridge returned {e.code}: {err}"
+    except URLError as e:
+        return (
+            f"error: cannot reach intake bridge at {INTAKE_BRIDGE_URL} ({e.reason}). "
+            "Ensure the runner is up: PYTHONPATH=. python -m agents.swarm_intake.uagent_runner"
+        )
     except Exception as e:
-        return f"error: {e}"
+        return f"error: {e!r}"
+
+    try:
+        return json.loads(body).get("result", body)
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return body
 
 
 def healthswarm_skill(query: str, timeout: int = 180) -> str:
