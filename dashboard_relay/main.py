@@ -19,6 +19,7 @@ Designed to never block the producer:
 - common.telemetry.beacon sets a 0.5s timeout, so the relay being down
   does not affect agents.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -136,7 +137,9 @@ def _correlate_outreach(evt: dict):
     received_at = evt.get("received_at")
 
     # Always append the raw beacon as a mini-transcript entry
-    base_update = {"$push": {"events": {"kind": kind, "at": received_at, "payload": payload}}}
+    base_update = {
+        "$push": {"events": {"kind": kind, "at": received_at, "payload": payload}}
+    }
 
     if kind == "AppointmentRequest":
         # First touch — create the row.
@@ -146,12 +149,16 @@ def _correlate_outreach(evt: dict):
             {"outreach_id": oid},
             {
                 "$setOnInsert": {
-                    "patient_id":       payload.get("patient_id"),
-                    "patient_name":     payload.get("patient_name"),
+                    "patient_id": payload.get("patient_id"),
+                    "patient_name": payload.get("patient_name"),
                     "language_request": payload.get("language"),
-                    "specialty":        payload.get("specialty"),
-                    "started_at":       datetime.fromisoformat(received_at.replace("Z", "+00:00")) if received_at else datetime.now(timezone.utc),
-                    "outcome":          "in_progress",
+                    "specialty": payload.get("specialty"),
+                    "started_at": (
+                        datetime.fromisoformat(received_at.replace("Z", "+00:00"))
+                        if received_at
+                        else datetime.now(timezone.utc)
+                    ),
+                    "outcome": "in_progress",
                 },
                 **base_update,
             },
@@ -160,51 +167,71 @@ def _correlate_outreach(evt: dict):
         return
 
     if kind == "CandidatesFound":
-        coll.update_one({"outreach_id": oid}, {
-            "$set":  {"candidates_count": payload.get("count")},
-            **base_update,
-        }, upsert=True)
+        coll.update_one(
+            {"outreach_id": oid},
+            {
+                "$set": {"candidates_count": payload.get("count")},
+                **base_update,
+            },
+            upsert=True,
+        )
         return
 
     if kind == "ClinicMatched":
-        coll.update_one({"outreach_id": oid}, {
-            "$set": {
-                "clinic_name":    payload.get("clinic"),
-                "clinic_address": payload.get("address"),
-                "clinic_phone":   payload.get("phone"),
+        coll.update_one(
+            {"outreach_id": oid},
+            {
+                "$set": {
+                    "clinic_name": payload.get("clinic"),
+                    "clinic_address": payload.get("address"),
+                    "clinic_phone": payload.get("phone"),
+                },
+                **base_update,
             },
-            **base_update,
-        }, upsert=True)
+            upsert=True,
+        )
         return
 
     if kind == "CallStarted":
-        coll.update_one({"outreach_id": oid}, {
-            "$set":  {"call_sid": payload.get("call_sid")},
-            **base_update,
-        }, upsert=True)
+        coll.update_one(
+            {"outreach_id": oid},
+            {
+                "$set": {"call_sid": payload.get("call_sid")},
+                **base_update,
+            },
+            upsert=True,
+        )
         return
 
     if kind == "LanguageDetected":
         detected = payload.get("language")
         attempt = coll.find_one({"outreach_id": oid}, {"language_request": 1})
         match = (attempt or {}).get("language_request") == detected
-        coll.update_one({"outreach_id": oid}, {
-            "$set": {
-                "language_detected": detected,
-                "language_match":    match,
-                "language_latency_ms": payload.get("latency_ms"),
+        coll.update_one(
+            {"outreach_id": oid},
+            {
+                "$set": {
+                    "language_detected": detected,
+                    "language_match": match,
+                    "language_latency_ms": payload.get("latency_ms"),
+                },
+                **base_update,
             },
-            **base_update,
-        }, upsert=True)
+            upsert=True,
+        )
         return
 
     if kind == "BookingResult":
         outcome = payload.get("outcome") or "in_progress"
         update = {
             "$set": {
-                "outcome":       outcome,
-                "ended_at":      datetime.fromisoformat(received_at.replace("Z", "+00:00")) if received_at else datetime.now(timezone.utc),
-                "booking_when":  payload.get("when"),
+                "outcome": outcome,
+                "ended_at": (
+                    datetime.fromisoformat(received_at.replace("Z", "+00:00"))
+                    if received_at
+                    else datetime.now(timezone.utc)
+                ),
+                "booking_when": payload.get("when"),
                 "booking_notes": payload.get("notes"),
             },
             **base_update,
@@ -221,6 +248,7 @@ def _correlate_outreach(evt: dict):
 
 
 # ── existing telemetry bus ────────────────────────────────────────────
+
 
 @app.post("/telemetry")
 async def telemetry(req: Request):
@@ -275,24 +303,32 @@ def health():
 
 # ── patient roster (for UI dropdowns) ─────────────────────────────────
 
+
 @app.get("/patients")
 def list_patients():
     db, _ = _mongo()
     return [
         {
-            "patient_id":       p["patient_id"],
-            "name":             p["name"],
+            "patient_id": p["patient_id"],
+            "name": p["name"],
             "primary_language": p.get("primary_language"),
-            "insurance_id":     p.get("insurance_id"),
+            "insurance_id": p.get("insurance_id"),
         }
         for p in db.patients.find(
             {},
-            {"_id": 0, "patient_id": 1, "name": 1, "primary_language": 1, "insurance_id": 1},
+            {
+                "_id": 0,
+                "patient_id": 1,
+                "name": 1,
+                "primary_language": 1,
+                "insurance_id": 1,
+            },
         ).sort("patient_id")
     ]
 
 
 # ── document uploads ─────────────────────────────────────────────────
+
 
 @app.post("/upload")
 async def upload(
@@ -326,37 +362,39 @@ async def upload(
     )
 
     meta = {
-        "patient_id":   patient_id,
-        "filename":     file.filename,
+        "patient_id": patient_id,
+        "filename": file.filename,
         "content_type": file.content_type or "application/octet-stream",
-        "size_bytes":   len(data),
-        "description":  description,
-        "uploaded_at":  datetime.now(timezone.utc),
-        "gridfs_id":    gridfs_id,
+        "size_bytes": len(data),
+        "description": description,
+        "uploaded_at": datetime.now(timezone.utc),
+        "gridfs_id": gridfs_id,
     }
     result = db.patient_documents.insert_one(meta)
     doc_id = str(result.inserted_id)
 
     # Beacon so the war-room dashboard shows the upload in real time
-    _broadcast({
-        "src": "patient",
-        "dst": "swarm-profiler",
-        "kind": "DocumentUploaded",
-        "payload": {
-            "patient_id":   patient_id,
-            "patient_name": patient["name"],
-            "filename":     file.filename,
-            "size_bytes":   len(data),
-            "content_type": file.content_type,
-            "doc_id":       doc_id,
-        },
-        "received_at": datetime.now(timezone.utc).isoformat(),
-    })
+    _broadcast(
+        {
+            "src": "patient",
+            "dst": "swarm-profiler",
+            "kind": "DocumentUploaded",
+            "payload": {
+                "patient_id": patient_id,
+                "patient_name": patient["name"],
+                "filename": file.filename,
+                "size_bytes": len(data),
+                "content_type": file.content_type,
+                "doc_id": doc_id,
+            },
+            "received_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
 
     return {
-        "ok":         True,
-        "doc_id":     doc_id,
-        "filename":   file.filename,
+        "ok": True,
+        "doc_id": doc_id,
+        "filename": file.filename,
         "size_bytes": len(data),
     }
 
@@ -365,34 +403,44 @@ async def upload(
 def list_documents(patient_id: str):
     db, _ = _mongo()
     out = []
-    for d in db.patient_documents.find({"patient_id": patient_id}).sort("uploaded_at", -1):
-        out.append({
-            "doc_id":       str(d["_id"]),
-            "filename":     d["filename"],
-            "content_type": d["content_type"],
-            "size_bytes":   d["size_bytes"],
-            "description":  d.get("description"),
-            "uploaded_at":  d["uploaded_at"].isoformat() if d.get("uploaded_at") else None,
-        })
+    for d in db.patient_documents.find({"patient_id": patient_id}).sort(
+        "uploaded_at", -1
+    ):
+        out.append(
+            {
+                "doc_id": str(d["_id"]),
+                "filename": d["filename"],
+                "content_type": d["content_type"],
+                "size_bytes": d["size_bytes"],
+                "description": d.get("description"),
+                "uploaded_at": (
+                    d["uploaded_at"].isoformat() if d.get("uploaded_at") else None
+                ),
+            }
+        )
     return out
 
 
 # ── outreach summary ─────────────────────────────────────────────────
 
+
 @app.get("/outreach/stats")
 def outreach_stats():
     db, _ = _mongo()
     pipe = [{"$group": {"_id": "$outcome", "n": {"$sum": 1}}}]
-    by_outcome = {row["_id"] or "unknown": row["n"] for row in db.outreach_attempts.aggregate(pipe)}
+    by_outcome = {
+        row["_id"] or "unknown": row["n"]
+        for row in db.outreach_attempts.aggregate(pipe)
+    }
     total = db.outreach_attempts.count_documents({})
     return {
-        "total":             total,
-        "booked":            by_outcome.get("booked", 0),
-        "no_answer":         by_outcome.get("no_answer", 0),
+        "total": total,
+        "booked": by_outcome.get("booked", 0),
+        "no_answer": by_outcome.get("no_answer", 0),
         "language_mismatch": by_outcome.get("language_mismatch", 0),
-        "failed":            by_outcome.get("failed", 0),
-        "in_progress":       by_outcome.get("in_progress", 0),
-        "by_outcome":        by_outcome,
+        "failed": by_outcome.get("failed", 0),
+        "in_progress": by_outcome.get("in_progress", 0),
+        "by_outcome": by_outcome,
     }
 
 
@@ -452,6 +500,39 @@ def fetch_document(doc_id: str):
         media_type=meta["content_type"],
         headers={
             "Content-Disposition": f'inline; filename="{meta["filename"]}"',
-            "Content-Length":      str(meta["size_bytes"]),
+            "Content-Length": str(meta["size_bytes"]),
         },
     )
+
+
+# ── transcript + fingerprint queries ────────────────────────────────
+
+
+@app.get("/transcript/{call_sid}")
+def get_transcript(call_sid: str):
+    """Retrieve stored transcript (Agent/User labelled) for a call."""
+    from common.transcript_store import get_transcript as _get
+
+    doc = _get(call_sid)
+    if not doc:
+        raise HTTPException(status_code=404, detail="transcript not found")
+    return doc
+
+
+@app.get("/fingerprints/{patient_id}")
+def list_fingerprints(patient_id: str):
+    """All conversation fingerprints for a patient, newest first."""
+    from common.transcript_store import get_fingerprints_by_patient
+
+    return get_fingerprints_by_patient(patient_id)
+
+
+@app.get("/fingerprint/{fingerprint_id}")
+def get_fingerprint(fingerprint_id: str):
+    """Single fingerprint by ID."""
+    from common.transcript_store import get_fingerprint as _get
+
+    doc = _get(fingerprint_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="fingerprint not found")
+    return doc

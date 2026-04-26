@@ -169,9 +169,11 @@ def initiate_call(
     to_number: str,
     patient_lang: str = "English",
     patient_name: str | None = None,
+    patient_id: str | None = None,
     specialty: str | None = None,
     insurance: str | None = None,
     time_pref: str | None = None,
+    clinic_name: str | None = None,
 ) -> str:
     """Place an outbound call via Twilio. Returns the call SID."""
     # Sanitize patient_lang to prevent TwiML injection — allow only letters/spaces
@@ -194,9 +196,12 @@ def initiate_call(
     # Store booking context so the WS handler can build a dynamic script
     _CALL_CONTEXT[call.sid] = {
         "patient_name": patient_name,
+        "patient_id": patient_id,
         "specialty": specialty,
         "insurance": insurance,
         "time_pref": time_pref,
+        "clinic_name": clinic_name,
+        "clinic_phone": to_number,
     }
     return call.sid
 
@@ -277,9 +282,11 @@ async def call_endpoint(req: Request):
         to_number=body["to"],
         patient_lang=body.get("language", "English"),
         patient_name=body.get("patient_name"),
+        patient_id=body.get("patient_id"),
         specialty=body.get("specialty"),
         insurance=body.get("insurance"),
         time_pref=body.get("time_pref"),
+        clinic_name=body.get("clinic_name"),
     )
     return {"call_sid": sid, "status": "initiated"}
 
@@ -316,8 +323,69 @@ def serve_clip(clip_id: str):
 # ── Twilio WebSocket handler ─────────────────────────────────────────
 
 
-CONVO_TURN_BYTES = 24_000  # ~3s of μ-law 8kHz — one conversational turn buffer
-CONVO_SILENCE_TIMEOUT_S = 5.0  # if no new audio for 5s, process what we have
+CONVO_MIN_TURN_BYTES = 8_000  # ~1s — minimum audio before checking for silence
+CONVO_TURN_BYTES = 24_000  # ~3s — trigger if silence detected after this much audio
+MAX_TURN_BYTES = 80_000  # ~10s — force-process even if still speaking
+SILENCE_THRESHOLD = 8  # μ-law avg energy below this = silence
+SILENCE_FRAMES_NEEDED = 25  # ~500ms consecutive silence frames = end of utterance
+MAX_CALL_DURATION_S = 180  # 3 min hard cap per call
+INACTIVITY_TIMEOUT_S = 30  # no speech for 30s → end call
+
+
+def _chunk_energy(data: bytes) -> float:
+    """Average magnitude of μ-law audio chunk. 0 = silence, ~127 = max.
+
+    In G.711 μ-law the encoded byte is bit-inverted; inverting and masking
+    the lower 7 bits gives a 0-127 magnitude regardless of sign.
+    """
+    if not data:
+        return 0.0
+    return sum((b ^ 0xFF) & 0x7F for b in data) / len(data)
+
+
+async def _call_timeout_watcher(state: dict) -> None:
+    """Background task: end call if max duration or inactivity exceeded."""
+    while state["phase"] != "done":
+        await asyncio.sleep(2)
+        now = time.time()
+        elapsed = now - state["call_start_time"]
+        if elapsed > MAX_CALL_DURATION_S:
+            print(f"[timeout] call exceeded {MAX_CALL_DURATION_S}s, ending")
+            state["phase"] = "done"
+            state["call_outcome"] = {"status": "timeout", "reason": "max_duration"}
+            return
+        if (
+            state["phase"] == "conversing"
+            and now - state["last_speech_ts"] > INACTIVITY_TIMEOUT_S
+        ):
+            print(f"[timeout] no speech for {INACTIVITY_TIMEOUT_S}s, ending")
+            state["phase"] = "done"
+            state["call_outcome"] = {"status": "timeout", "reason": "inactivity"}
+            return
+
+
+def _persist_transcript(call_sid: str, state: dict, booking_ctx: dict) -> None:
+    """Save transcript + fingerprint to MongoDB (called from WS close)."""
+    from common.transcript_store import save_transcript
+
+    convo = state.get("convo")
+    raw = list(convo.history) if convo else []
+    if not raw:
+        return
+    outcome = state.get("call_outcome", {})
+    duration = time.time() - state.get("call_start_time", time.time())
+    save_transcript(
+        call_sid=call_sid,
+        patient_id=booking_ctx.get("patient_id"),
+        patient_name=booking_ctx.get("patient_name"),
+        clinic_name=booking_ctx.get("clinic_name"),
+        clinic_phone=booking_ctx.get("clinic_phone"),
+        language=state.get("language_detected"),
+        raw_transcript=raw,
+        outcome=outcome.get("booking_status", outcome.get("status", "unknown")),
+        turns=convo.turns if convo else 0,
+        duration_s=round(duration, 1),
+    )
 
 
 @app.websocket("/ws/call")
@@ -325,20 +393,26 @@ async def call_ws(ws: WebSocket):
     await ws.accept()
     stream_sid: str | None = None
     mulaw_buffer = bytearray()
+    now = time.time()
     state: dict = {
         "language_detected": None,
         "detection_in_flight": False,
         "phase": "detecting",  # detecting → conversing → done
-        "speaking": False,  # True while TTS is playing (don't buffer our own echo)
+        "speaking": False,  # True while TTS is playing
+        "turn_processing": False,  # True while a conversation turn is running
+        "silence_frames": 0,  # consecutive silence frames
+        "last_speech_ts": now,  # last time speech energy detected
+        "call_start_time": now,
     }
     booking_ctx: dict = {}
     convo_buffer = bytearray()
-    last_media_ts: float = 0.0
     DETECT_AFTER_BYTES = 24_000
 
     call_sid = ""
     try:
         while True:
+            if state["phase"] == "done":
+                break
             msg = json.loads(await ws.receive_text())
             evt = msg.get("event")
 
@@ -347,14 +421,16 @@ async def call_ws(ws: WebSocket):
                 call_sid = msg["start"].get("callSid", "")
                 print(f"[ws] start streamSid={stream_sid} callSid={call_sid}")
                 booking_ctx = _CALL_CONTEXT.pop(call_sid, {})
+                state["call_start_time"] = time.time()
+                state["last_speech_ts"] = time.time()
                 asyncio.create_task(
                     _speak_to_call(ws, stream_sid, "English", stream_disclosure)
                 )
+                asyncio.create_task(_call_timeout_watcher(state))
 
             elif evt == "media":
                 payload_b64 = msg["media"]["payload"]
                 audio_bytes = base64.b64decode(payload_b64)
-                last_media_ts = time.time()
 
                 # Phase 1: language detection
                 if state["phase"] == "detecting":
@@ -374,37 +450,60 @@ async def call_ws(ws: WebSocket):
                             )
                         )
 
-                # Phase 2: multi-turn conversation
+                # Phase 2: multi-turn conversation with silence detection
                 elif state["phase"] == "conversing" and not state["speaking"]:
                     convo_buffer.extend(audio_bytes)
-                    if len(convo_buffer) >= CONVO_TURN_BYTES:
-                        buf = bytes(convo_buffer)
-                        convo_buffer.clear()
-                        asyncio.create_task(
-                            _conversation_turn(ws, stream_sid, buf, state)
-                        )
+
+                    # Track speech energy for turn boundary detection
+                    energy = _chunk_energy(audio_bytes)
+                    if energy > SILENCE_THRESHOLD:
+                        state["last_speech_ts"] = time.time()
+                        state["silence_frames"] = 0
+                    else:
+                        state["silence_frames"] += 1
+
+                    # Fire turn when: (enough audio + silence) OR max buffer
+                    if not state["turn_processing"]:
+                        should_fire = False
+                        if len(convo_buffer) >= MAX_TURN_BYTES:
+                            should_fire = True  # hard cap — force process
+                        elif (
+                            len(convo_buffer) >= CONVO_TURN_BYTES
+                            and state["silence_frames"] >= SILENCE_FRAMES_NEEDED
+                        ):
+                            should_fire = True  # speech ended — natural turn
+                        if should_fire:
+                            buf = bytes(convo_buffer)
+                            convo_buffer.clear()
+                            state["turn_processing"] = True
+                            state["silence_frames"] = 0
+                            asyncio.create_task(
+                                _conversation_turn(ws, stream_sid, buf, state)
+                            )
 
             elif evt == "stop":
                 print("[ws] stop")
-                outcome = state.get("call_outcome", {"status": "completed"})
-                convo = state.get("convo")
-                if convo:
-                    outcome["booking_status"] = convo.booking_status
-                    outcome["turns"] = convo.turns
-                if call_sid:
-                    _CALL_TRANSCRIPTS[call_sid] = list(convo.history) if convo else []
-                    _CALL_RESULTS[call_sid] = outcome
-                    _CALL_TIMESTAMPS[call_sid] = time.time()
-                report_call_outcome(call_sid, outcome)
                 break
 
     except Exception as e:
         print(f"[ws] error: {e!r}")
+    finally:
+        # ── persist transcript + resolve outcome ──────────────────
+        outcome = state.get("call_outcome", {"status": "completed"})
+        convo = state.get("convo")
+        if convo:
+            outcome["booking_status"] = convo.booking_status
+            outcome["turns"] = convo.turns
         if call_sid:
-            _CALL_TRANSCRIPTS[call_sid] = []
-            _CALL_RESULTS[call_sid] = {"status": "failed", "error": str(e)}
+            _CALL_TRANSCRIPTS[call_sid] = list(convo.history) if convo else []
+            _CALL_RESULTS[call_sid] = outcome
             _CALL_TIMESTAMPS[call_sid] = time.time()
-        report_call_outcome(call_sid, {"status": "failed", "error": str(e)})
+            try:
+                _persist_transcript(call_sid, state, booking_ctx)
+            except Exception as e:
+                print(f"[transcript] persist failed (non-fatal): {e!r}")
+        report_call_outcome(call_sid, outcome)
+        state["phase"] = "done"  # stop the timeout watcher
 
 
 async def _detect_and_respond(
@@ -503,67 +602,78 @@ async def _conversation_turn(
     mulaw: bytes,
     state: dict,
 ) -> None:
-    """One turn of the conversation loop: translate → LLM → TTS."""
-    convo: ConversationState = state["convo"]
-    language = state["language_detected"]
-    loop = asyncio.get_event_loop()
+    """One turn of the conversation loop: translate → LLM → TTS.
 
-    if convo.is_terminal or convo.turns >= ConversationState.MAX_TURNS:
-        state["phase"] = "done"
-        state["call_outcome"] = {"status": convo.booking_status}
-        print(f"[convo] terminal after {convo.turns} turns: {convo.booking_status}")
-        return
+    Sets state["turn_processing"] = False on every exit path so the
+    WebSocket handler can fire the next turn.
+    """
+    try:
+        convo: ConversationState = state["convo"]
+        language = state["language_detected"]
+        loop = asyncio.get_event_loop()
 
-    # 1. Convert buffered audio to WAV
-    clip_id = uuid.uuid4().hex
-    wav_path = os.path.join(CLIPS_DIR, f"{clip_id}.wav")
-    await loop.run_in_executor(None, mulaw_8k_to_pcm_16k, mulaw, wav_path)
-    audio_url = f"{NGROK_URL}/clips/{clip_id}.wav"
+        if convo.is_terminal or convo.turns >= ConversationState.MAX_TURNS:
+            state["phase"] = "done"
+            state["call_outcome"] = {"status": convo.booking_status}
+            print(f"[convo] terminal after {convo.turns} turns: {convo.booking_status}")
+            return
 
-    # 2. Translate receptionist speech via Gemma
-    def _translate() -> str:
-        try:
-            r = requests.post(
-                f"{GEMMA_URL}/translate",
-                json={"audio_url": audio_url, "target_lang": "en"},
-                timeout=15,
-            )
-            return r.json().get("text", "")
-        except Exception as e:
-            print(f"[convo] translate failed: {e!r}")
-            return ""
+        # 1. Convert buffered audio to WAV
+        clip_id = uuid.uuid4().hex
+        wav_path = os.path.join(CLIPS_DIR, f"{clip_id}.wav")
+        await loop.run_in_executor(None, mulaw_8k_to_pcm_16k, mulaw, wav_path)
+        audio_url = f"{NGROK_URL}/clips/{clip_id}.wav"
 
-    transcript = await loop.run_in_executor(None, _translate)
-    if not transcript.strip():
-        print("[convo] empty transcript, skipping turn")
-        return
+        # 2. Translate receptionist speech via Gemma
+        def _translate() -> str:
+            try:
+                r = requests.post(
+                    f"{GEMMA_URL}/translate",
+                    json={"audio_url": audio_url, "target_lang": "en"},
+                    timeout=15,
+                )
+                return r.json().get("text", "")
+            except Exception as e:
+                print(f"[convo] translate failed: {e!r}")
+                return ""
 
-    print(f"[convo] receptionist said: {transcript[:100]}")
+        transcript = await loop.run_in_executor(None, _translate)
+        if not transcript.strip():
+            print("[convo] empty transcript, skipping turn")
+            return
 
-    # 3. Generate next response via ASI:One
-    response_text = await loop.run_in_executor(None, convo.next_response, transcript)
-    print(f"[convo] responding: {response_text[:100]} (status={convo.booking_status})")
+        print(f"[convo] receptionist said: {transcript[:100]}")
 
-    # 4. Speak response back
-    state["speaking"] = True
-    await _speak_to_call(
-        ws,
-        stream_sid,
-        language,
-        tts_source=lambda: speak_text(response_text, language),
-    )
-    state["speaking"] = False
-
-    # 5. Check terminal state
-    if convo.is_terminal:
-        state["phase"] = "done"
-        state["call_outcome"] = {"status": convo.booking_status}
-        beacon(
-            "swarm-caller",
-            "clinic",
-            "BookingResult",
-            {"status": convo.booking_status, "turns": convo.turns},
+        # 3. Generate next response via ASI:One
+        response_text = await loop.run_in_executor(
+            None, convo.next_response, transcript
         )
+        print(
+            f"[convo] responding: {response_text[:100]} (status={convo.booking_status})"
+        )
+
+        # 4. Speak response back
+        state["speaking"] = True
+        await _speak_to_call(
+            ws,
+            stream_sid,
+            language,
+            tts_source=lambda: speak_text(response_text, language),
+        )
+        state["speaking"] = False
+
+        # 5. Check terminal state
+        if convo.is_terminal:
+            state["phase"] = "done"
+            state["call_outcome"] = {"status": convo.booking_status}
+            beacon(
+                "swarm-caller",
+                "clinic",
+                "BookingResult",
+                {"status": convo.booking_status, "turns": convo.turns},
+            )
+    finally:
+        state["turn_processing"] = False
 
 
 async def _speak_to_call(

@@ -8,11 +8,11 @@ import requests
 from common.telemetry import beacon
 from agents.swarm_fingerprint import agent as fingerprint
 
-VOICE_GATEWAY_URL   = os.getenv("VOICE_GATEWAY_URL",   "http://localhost:8000")
-DEMO_PHONE_FALLBACK = os.getenv("DEMO_PHONE_FALLBACK",  "+1-555-DEMO")
-VOICE_GW_TIMEOUT    = float(os.getenv("VOICE_GW_TIMEOUT",    "10"))
-CALL_POLL_INTERVAL  = float(os.getenv("CALL_POLL_INTERVAL_S", "5"))
-CALL_MAX_WAIT       = float(os.getenv("CALL_MAX_WAIT_S",      "150"))
+VOICE_GATEWAY_URL = os.getenv("VOICE_GATEWAY_URL", "http://localhost:8000")
+DEMO_PHONE_FALLBACK = os.getenv("DEMO_PHONE_FALLBACK", "+1-555-DEMO")
+VOICE_GW_TIMEOUT = float(os.getenv("VOICE_GW_TIMEOUT", "10"))
+CALL_POLL_INTERVAL = float(os.getenv("CALL_POLL_INTERVAL_S", "5"))
+CALL_MAX_WAIT = float(os.getenv("CALL_MAX_WAIT_S", "150"))
 MAX_FALLBACK_ATTEMPTS = int(os.getenv("MAX_FALLBACK_ATTEMPTS", "3"))
 
 
@@ -20,13 +20,13 @@ def _failed_fingerprint(clinic: dict, reason: str) -> dict:
     """Build a fingerprint dict locally for an unreachable clinic — no LLM round-trip."""
     name = clinic.get("name", "Unknown clinic")
     return {
-        "clinic_name":        name,
-        "clinic":             clinic,
-        "available":          False,
+        "clinic_name": name,
+        "clinic": clinic,
+        "available": False,
         "insurance_accepted": None,
-        "wait_time":          None,
-        "key_facts":          [reason],
-        "summary":            f"{name} unreachable — {reason}.",
+        "wait_time": None,
+        "key_facts": [reason],
+        "summary": f"{name} unreachable — {reason}.",
     }
 
 
@@ -40,24 +40,31 @@ def _call_one(
     """Place one inquiry call, wait for its transcript, fingerprint it, append to out."""
     phone = clinic.get("phone") or DEMO_PHONE_FALLBACK
 
-    beacon("swarm-caller", "clinic", "CallStarted", {
-        "clinic": clinic.get("name"),
-        "phone":  phone,
-        "patient": patient.get("name"),
-        "language": patient.get("language", "English"),
-    })
+    beacon(
+        "swarm-caller",
+        "clinic",
+        "CallStarted",
+        {
+            "clinic": clinic.get("name"),
+            "phone": phone,
+            "patient": patient.get("name"),
+            "language": patient.get("language", "English"),
+        },
+    )
 
     # 1 — Place the call
     try:
         resp = requests.post(
             f"{VOICE_GATEWAY_URL}/call",
             json={
-                "to":           phone,
-                "language":     patient.get("language", "English"),
+                "to": phone,
+                "language": patient.get("language", "English"),
                 "patient_name": patient.get("name"),
-                "specialty":    patient.get("specialty"),
-                "insurance":    patient.get("insurance"),
-                "time_pref":    requirements.get("time_pref"),
+                "patient_id": patient.get("patient_id"),
+                "specialty": patient.get("specialty"),
+                "insurance": patient.get("insurance"),
+                "time_pref": requirements.get("time_pref"),
+                "clinic_name": clinic.get("name"),
             },
             timeout=VOICE_GW_TIMEOUT,
         )
@@ -143,18 +150,25 @@ def call_ranked(ranked_clinics: list[dict], patient: dict, requirements: dict) -
     attempts = []
     for idx, clinic in enumerate(ranked_clinics[:MAX_FALLBACK_ATTEMPTS], 1):
         phone = clinic.get("phone") or DEMO_PHONE_FALLBACK
-        beacon("swarm-caller", "clinic", "CallAttempt", {
-            "attempt": idx,
-            "clinic": clinic.get("name"),
-            "phone": phone,
-            "match_score": clinic.get("match_score"),
-        })
+        beacon(
+            "swarm-caller",
+            "clinic",
+            "CallAttempt",
+            {
+                "attempt": idx,
+                "clinic": clinic.get("name"),
+                "phone": phone,
+                "match_score": clinic.get("match_score"),
+            },
+        )
 
         out: list[dict] = []
         lock = threading.Lock()
         _call_one(clinic, patient, requirements, out, lock)
-        fingerprint_result = out[0] if out else _failed_fingerprint(
-            clinic, "call ended without a fingerprint"
+        fingerprint_result = (
+            out[0]
+            if out
+            else _failed_fingerprint(clinic, "call ended without a fingerprint")
         )
         attempts.append(fingerprint_result)
 
@@ -163,13 +177,18 @@ def call_ranked(ranked_clinics: list[dict], patient: dict, requirements: dict) -
         status = result.get("status") if isinstance(result, dict) else None
         booked = status == "booked" or available is True
 
-        beacon("swarm-caller", "swarm-intake", "CallAttemptResult", {
-            "attempt": idx,
-            "clinic": clinic.get("name"),
-            "booked": booked,
-            "available": available,
-            "summary": fingerprint_result.get("summary"),
-        })
+        beacon(
+            "swarm-caller",
+            "swarm-intake",
+            "CallAttemptResult",
+            {
+                "attempt": idx,
+                "clinic": clinic.get("name"),
+                "booked": booked,
+                "available": available,
+                "summary": fingerprint_result.get("summary"),
+            },
+        )
 
         if booked:
             return {
