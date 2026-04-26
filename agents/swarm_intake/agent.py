@@ -213,7 +213,18 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
     if not ranked:
         return {"error": "no clinic candidates found", "profile": profile}
 
-    to_call = [c for c in ranked if not c.get("disqualified")][:CALL_TOP_N]
+    # Deduplicate by phone number so we never call the same line twice
+    _seen_phones: set = set()
+    to_call: list = []
+    for c in ranked:
+        if c.get("disqualified"):
+            continue
+        phone = c.get("phone") or "unknown"
+        if phone not in _seen_phones:
+            _seen_phones.add(phone)
+            to_call.append(c)
+        if len(to_call) >= CALL_TOP_N:
+            break
     if not to_call:
         return {"error": "all clinic candidates disqualified", "profile": profile, "ranked": ranked[:5]}
 
