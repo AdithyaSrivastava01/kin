@@ -138,7 +138,14 @@ def confirm_booking(db, patient_id: str, winner: dict, winner_fp: dict, requirem
     }
 
 
-def run(db, patient_id: str, request_text: str = "", specialty: str | None = None) -> dict:
+def run(
+    db,
+    patient_id: str,
+    request_text: str = "",
+    specialty: str | None = None,
+    candidates_override: list[dict] | None = None,
+    progress_cb=None,
+) -> dict:
     # Extract caller_name= override injected by _resolve_patient for unknown patients
     caller_name = None
     clean_text = request_text
@@ -167,12 +174,20 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
         "query": request_text or f"Appointment request for patient {patient_id}",
     })
 
+    def _ping(msg: str) -> None:
+        if progress_cb:
+            try:
+                progress_cb(msg)
+            except Exception:
+                pass
+
     # Resolve specialty early so finder can use it
     if not specialty:
         specialty = _parse_specialty(request_text) if request_text else "clinic"
+    _ping(f"🧠 ASI:One identified specialty: *{specialty}*")
 
     profile: dict    = {}
-    candidates: list = []
+    candidates: list = list(candidates_override) if candidates_override else []
 
     def _run_profiler():
         beacon("swarm-intake", "swarm-profiler", "ChatMessage", {"patient_id": patient_id})
@@ -189,11 +204,14 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
         candidates.extend(finder.run(db, p["location"], specialty))
 
     t_profiler = threading.Thread(target=_run_profiler, daemon=True)
-    t_finder   = threading.Thread(target=_run_finder,   daemon=True)
     t_profiler.start()
-    t_finder.start()
-    t_profiler.join()
-    t_finder.join()
+    if candidates_override:
+        t_profiler.join()
+    else:
+        t_finder = threading.Thread(target=_run_finder, daemon=True)
+        t_finder.start()
+        t_profiler.join()
+        t_finder.join()
 
     if not profile or profile.get("error") == "PROFILE_NOT_FOUND":
         return {"error": f"patient {patient_id!r} not found"}
@@ -202,6 +220,7 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
     if caller_name:
         profile["_caller_name"] = caller_name
     requirements = _parse_requirements(request_text, profile)
+    _ping(f"📋 Extracted: problem='{requirements.get('problem','-')}'  language={requirements.get('language','English')}")
 
     beacon("swarm-intake", "swarm-matcher", "ChatMessage", {
         "candidates": len(candidates),
@@ -213,21 +232,14 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
     if not ranked:
         return {"error": "no clinic candidates found", "profile": profile}
 
-    # Deduplicate by phone number so we never call the same line twice
-    _seen_phones: set = set()
-    to_call: list = []
-    for c in ranked:
-        if c.get("disqualified"):
-            continue
-        phone = c.get("phone") or "unknown"
-        if phone not in _seen_phones:
-            _seen_phones.add(phone)
-            to_call.append(c)
-        if len(to_call) >= CALL_TOP_N:
-            break
+    score_lines = [f"  • {c.get('name')}: {c.get('match_score',0)}/100" for c in ranked]
+    _ping("⚖️ Pre-call match scores:\n" + "\n".join(score_lines))
+
+    to_call = [c for c in ranked if not c.get("disqualified")][:CALL_TOP_N]
     if not to_call:
         return {"error": "all clinic candidates disqualified", "profile": profile, "ranked": ranked[:5]}
 
+    _ping(f"📞 Calling {len(to_call)} clinic(s) in parallel...")
     beacon("swarm-intake", "swarm-caller", "ChatMessage", {
         "clinics": [c["name"] for c in to_call],
         "requirements": requirements,
@@ -241,6 +253,12 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
         "stage": "judge_fingerprints",
         "fingerprints": [fp.get("clinic_name") for fp in fingerprints],
     })
+    fp_lines = [
+        f"  • {fp.get('clinic_name')}: post-call score {fp.get('match_score',0)}/100  available={fp.get('available')}"
+        for fp in fingerprints
+    ]
+    _ping("📞 Calls completed. Post-call fingerprint scores:\n" + "\n".join(fp_lines))
+
     winner = matcher.run(requirements, fingerprints)
 
     if not winner:
