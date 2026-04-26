@@ -66,21 +66,33 @@ def _call_one(
     # 1 — Place the call (handed off to ElevenLabs Conversational AI
     # via /call → eleven_caller.place_call, which populates the agent's
     # dynamic_variables with the patient context below).
+    # caller_name in requirements lets unknown patients (e.g. "Adi") override
+    # the demo persona name so the ElevenLabs agent says the right name on the call
+    call_name = requirements.get("caller_name") or patient.get("name")
+
+    call_payload = {
+        "to": phone,
+        "language": patient.get("language", "English"),
+        "patient_name": call_name,
+        "patient_id": patient.get("patient_id"),
+        "specialty": patient.get("specialty"),
+        "problem": requirements.get("problem") or _profile_problem(patient),
+        "insurance": patient.get("insurance"),
+        "tests_needed": requirements.get("tests_needed") or "none",
+        "time_pref": requirements.get("time_pref"),
+        "clinic_name": clinic.get("name"),
+    }
+    print(
+        f"[swarm-caller] ElevenLabs vars → clinic={clinic.get('name')} "
+        f"specialty={call_payload['specialty']!r} "
+        f"problem={call_payload['problem']!r} "
+        f"patient_name={call_payload['patient_name']!r}"
+    )
+
     try:
         resp = requests.post(
             f"{VOICE_GATEWAY_URL}/call",
-            json={
-                "to": phone,
-                "language": patient.get("language", "English"),
-                "patient_name": patient.get("name"),
-                "patient_id": patient.get("patient_id"),
-                "specialty": patient.get("specialty"),
-                "problem": requirements.get("problem") or _profile_problem(patient),
-                "insurance": patient.get("insurance"),
-                "tests_needed": requirements.get("tests_needed") or "none",
-                "time_pref": requirements.get("time_pref"),
-                "clinic_name": clinic.get("name"),
-            },
+            json=call_payload,
             timeout=VOICE_GW_TIMEOUT,
         )
         resp.raise_for_status()

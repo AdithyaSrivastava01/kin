@@ -14,7 +14,7 @@ from agents.swarm_caller import agent as caller
 
 def _parse_specialty(request_text: str) -> str:
     """Extract a clinic specialty keyword from a free-text request via ASI:One."""
-    return asi_chat(
+    result = asi_chat(
         system=(
             "Extract the medical specialty from the patient request. "
             "Reply with a single lowercase word only — one of: "
@@ -24,6 +24,8 @@ def _parse_specialty(request_text: str) -> str:
         user=request_text,
         max_tokens=10,
     ).strip().lower()
+    print(f"[swarm-intake] _parse_specialty({request_text[:60]!r}) → {result!r}")
+    return result
 
 
 def _parse_requirements(request_text: str, profile: dict) -> dict:
@@ -68,6 +70,11 @@ def _parse_requirements(request_text: str, profile: dict) -> dict:
     reqs["insurance"] = profile.get("insurance")
     reqs["language"]  = profile.get("language", "English")
 
+    # If the request mentions a name that differs from the profile name,
+    # preserve it so swarm-caller uses it on the phone (not the demo persona name).
+    if profile.get("_caller_name"):
+        reqs["caller_name"] = profile["_caller_name"]
+
     # Drop null/empty values so prompts stay clean
     return {k: v for k, v in reqs.items() if v}
 
@@ -86,7 +93,9 @@ def confirm_booking(db, patient_id: str, winner: dict, winner_fp: dict, requirem
     if not profile or profile.get("error") == "PROFILE_NOT_FOUND":
         return {"error": f"patient {patient_id!r} not found for booking confirmation"}
 
-    profile["specialty"] = requirements.get("specialty", winner.get("specialty"))
+    # Use the explicitly stored Phase 1 specialty (from _parse_specialty, not the
+    # LLM requirements which may extract a different specialist name).
+    profile["specialty"] = winner.get("specialty") or requirements.get("specialty") or "clinic"
 
     # Extract the best available time slot from the Phase 1 fingerprint
     key_facts = winner_fp.get("key_facts", [])
@@ -125,6 +134,14 @@ def confirm_booking(db, patient_id: str, winner: dict, winner_fp: dict, requirem
 
 
 def run(db, patient_id: str, request_text: str = "", specialty: str | None = None) -> dict:
+    # Extract caller_name= override injected by _resolve_patient for unknown patients
+    caller_name = None
+    clean_text = request_text
+    for token in request_text.split():
+        if token.startswith("caller_name="):
+            caller_name = token.split("=", 1)[1]
+            clean_text = request_text.replace(token, "").strip()
+    request_text = clean_text
     """Orchestrate the full booking swarm for a patient.
 
     Flow:
@@ -177,6 +194,8 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
         return {"error": f"patient {patient_id!r} not found"}
 
     profile["specialty"] = specialty
+    if caller_name:
+        profile["_caller_name"] = caller_name
     requirements = _parse_requirements(request_text, profile)
 
     beacon("swarm-intake", "swarm-matcher", "ChatMessage", {
@@ -234,4 +253,5 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
         "winner_key_facts": winner_fp.get("key_facts", []),
         "transcript_en":   winner_fp.get("transcript_en"),
         "requirements":    requirements,
+        "specialty":       specialty,  # Phase 1 specialty (from _parse_specialty, not LLM requirements)
     }

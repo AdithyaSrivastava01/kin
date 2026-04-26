@@ -52,10 +52,36 @@ _SPECIALTY_FALLBACK = [
 ]
 
 
+def _extract_caller_name(text: str) -> str | None:
+    """Best-effort extraction of the caller's first name from free text.
+    Used when no demo persona is matched so the ElevenLabs agent uses the
+    real name on the call instead of the fallback persona name.
+    """
+    import re
+    # Look for "for <Name>" or "I am <Name>" or "my name is <Name>"
+    patterns = [
+        r"\bfor\s+([A-Z][a-z]+)\b",
+        r"\bI(?:'m| am)\s+([A-Z][a-z]+)\b",
+        r"\bmy name is\s+([A-Z][a-z]+)\b",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text)
+        if m:
+            return m.group(1)
+    # First capitalised word that isn't a common English word
+    common = {"Book", "Find", "Need", "Want", "Male", "Female", "The", "Please", "Help"}
+    for word in text.split():
+        clean = re.sub(r"[^A-Za-z]", "", word)
+        if clean and clean[0].isupper() and clean not in common and len(clean) > 2:
+            return clean
+    return None
+
+
 def _resolve_patient(text: str) -> tuple[str, str]:
     """Return (patient_id, request_text).
     Priority: explicit patient_id= token > demo first name >
               specialty keyword fallback > rahul-001 default.
+    Appends caller_name= token when the real caller isn't a demo persona.
     """
     for token in text.split():
         if token.startswith("patient_id="):
@@ -67,8 +93,12 @@ def _resolve_patient(text: str) -> tuple[str, str]:
             return pid, text
     for keywords, pid in _SPECIALTY_FALLBACK:
         if any(kw in lower for kw in keywords):
-            return pid, text
-    return "rahul-001", text
+            caller = _extract_caller_name(text)
+            enriched = f"{text} caller_name={caller}" if caller else text
+            return pid, enriched
+    caller = _extract_caller_name(text)
+    enriched = f"{text} caller_name={caller}" if caller else text
+    return "rahul-001", enriched
 
 
 def _format_reply(result: dict) -> str:
@@ -232,11 +262,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 _PENDING_BOOKINGS: dict = {}
 _PENDING_LOCK = threading.Lock()
 
-_CONFIRM_KEYWORDS = ("confirm", "yes book", "book it", "book the", "go ahead", "proceed")
+# Confirmation requires an explicit short phrase — NOT just any query containing "book"
+_CONFIRM_KEYWORDS = ("confirm", "yes book it", "book it", "go ahead and book", "proceed with booking", "yes confirm", "please book")
 
 
 def _is_confirmation(text: str) -> bool:
-    lower = text.lower()
+    lower = text.lower().strip()
+    # Single-word or very short confirmations
+    if lower in ("confirm", "yes", "ok", "okay", "proceed", "go ahead", "book it", "do it"):
+        return True
     return any(kw in lower for kw in _CONFIRM_KEYWORDS)
 
 
@@ -330,10 +364,13 @@ class _BookingHandler(BaseHTTPRequestHandler):
                     reply = _format_reply(result)
                 else:
                     # Save pending state so Phase 2 can use it
+                    # Include specialty from Phase 1 (_parse_specialty result) so
+                    # confirm_booking uses the same specialty for the booking call.
                     winner_clinic = {
-                        "name": result.get("clinic"),
-                        "phone": result.get("phone"),
-                        "language": result.get("language"),
+                        "name":      result.get("clinic"),
+                        "phone":     result.get("phone"),
+                        "language":  result.get("language"),
+                        "specialty": result.get("specialty"),
                     }
                     winner_fp = {
                         "key_facts": result.get("winner_key_facts", []),
