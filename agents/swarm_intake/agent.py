@@ -257,6 +257,9 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
         "call_summary":    winner_fp.get("summary"),
         "winner_key_facts": winner_fp.get("key_facts", []),
         "transcript_en":   winner_fp.get("transcript_en"),
+        "match_score":     winner_fp.get("match_score", 0),
+        "judge_score":     winner.get("judge_score", 0),
+        "all_scores":      winner.get("all_scores", []),
         "requirements":    requirements,
-        "specialty":       specialty,  # Phase 1 specialty (from _parse_specialty, not LLM requirements)
+        "specialty":       specialty,
     }

@@ -314,6 +314,17 @@ def _format_confirmation_prompt(result: dict) -> str:
         lines.append("Context sent to the clinic:")
         lines.extend(ctx_lines)
 
+    # Show match scores for all clinics called
+    all_scores = result.get("all_scores", [])
+    if all_scores:
+        lines.append("")
+        lines.append("Clinic match scores:")
+        for s in all_scores:
+            marker = "★" if s.get("clinic") == result.get("clinic") else " "
+            score = s.get("judge_score") or s.get("match_score", 0)
+            avail = "✓" if s.get("available") else ("?" if s.get("available") is None else "✗")
+            lines.append(f"  {marker} {s['clinic']}: {score}/100 {avail}")
+
     lines.append("")
     lines.append("Reply 'confirm' to book this appointment, or ask for a different clinic.")
     return "\n".join(lines)
