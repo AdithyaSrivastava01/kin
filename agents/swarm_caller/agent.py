@@ -1,48 +1,132 @@
-# swarm_caller — telephony/outreach agent (Engineer 1)
+# swarm_caller — telephony/outreach agent
 import os
+import time
+import threading
+
 import requests
+
 from common.telemetry import beacon
+from agents.swarm_fingerprint import agent as fingerprint
 
-VOICE_GATEWAY_URL   = os.getenv("VOICE_GATEWAY_URL", "http://localhost:8000")
-DEMO_PHONE_FALLBACK = os.getenv("DEMO_PHONE_FALLBACK", "+1-555-DEMO")
-VOICE_GW_TIMEOUT    = float(os.getenv("VOICE_GW_TIMEOUT", "10"))
+VOICE_GATEWAY_URL   = os.getenv("VOICE_GATEWAY_URL",   "http://localhost:8000")
+DEMO_PHONE_FALLBACK = os.getenv("DEMO_PHONE_FALLBACK",  "+1-555-DEMO")
+VOICE_GW_TIMEOUT    = float(os.getenv("VOICE_GW_TIMEOUT",    "10"))
+CALL_POLL_INTERVAL  = float(os.getenv("CALL_POLL_INTERVAL_S", "5"))
+CALL_MAX_WAIT       = float(os.getenv("CALL_MAX_WAIT_S",      "150"))
 
 
-def run(clinic: dict, patient: dict) -> str:
-    """Trigger an outbound call to the clinic via the voice gateway.
+def _failed_fingerprint(clinic: dict, reason: str) -> dict:
+    """Build a fingerprint dict locally for an unreachable clinic — no LLM round-trip."""
+    name = clinic.get("name", "Unknown clinic")
+    return {
+        "clinic_name":        name,
+        "clinic":             clinic,
+        "available":          False,
+        "insurance_accepted": None,
+        "wait_time":          None,
+        "key_facts":          [reason],
+        "summary":            f"{name} unreachable — {reason}.",
+    }
 
-    clinic  — winner dict from swarm-matcher (name, phone, address, ...)
-    patient — profile dict from swarm-profiler (name, language, insurance, ...)
 
-    Emits a CallStarted beacon then hands off to voice_gateway/main.py which
-    handles the full Twilio → Gemma → ElevenLabs pipeline from there.
-
-    Returns the Twilio call SID, or '' on failure.
-    """
+def _call_one(
+    clinic: dict,
+    patient: dict,
+    requirements: dict,
+    out: list,
+    lock: threading.Lock,
+) -> None:
+    """Place one inquiry call, wait for its transcript, fingerprint it, append to out."""
     phone = clinic.get("phone") or DEMO_PHONE_FALLBACK
 
     beacon("swarm-caller", "clinic", "CallStarted", {
         "clinic": clinic.get("name"),
-        "phone": phone,
+        "phone":  phone,
         "patient": patient.get("name"),
         "language": patient.get("language", "English"),
     })
 
+    # 1 — Place the call
     try:
         resp = requests.post(
             f"{VOICE_GATEWAY_URL}/call",
             json={
-                "to": phone,
-                "language": patient.get("language", "English"),
+                "to":           phone,
+                "language":     patient.get("language", "English"),
                 "patient_name": patient.get("name"),
-                "specialty": patient.get("specialty"),
-                "insurance": patient.get("insurance"),
-                "time_pref": patient.get("time_pref"),
+                "specialty":    patient.get("specialty"),
+                "insurance":    patient.get("insurance"),
+                "time_pref":    requirements.get("time_pref"),
             },
             timeout=VOICE_GW_TIMEOUT,
         )
         resp.raise_for_status()
-        return resp.json().get("call_sid", "")
+        call_sid = resp.json().get("call_sid", "")
     except Exception as e:
-        print(f"[swarm-caller] voice gateway error: {e!r}")
-        return ""
+        print(f"[swarm-caller] call to {clinic.get('name')} failed to start: {e!r}")
+        with lock:
+            out.append(_failed_fingerprint(clinic, f"call could not be placed: {e}"))
+        return
+
+    # 2 — Poll /transcript/{call_sid} until the call finishes or we time out
+    transcript: list = []
+    completed = False
+    deadline = time.time() + CALL_MAX_WAIT
+    while time.time() < deadline:
+        try:
+            r = requests.get(
+                f"{VOICE_GATEWAY_URL}/transcript/{call_sid}",
+                timeout=5,
+            )
+            if r.status_code == 200:
+                transcript = r.json().get("transcript", [])
+                completed = True
+                break
+            # 202 = still in progress, keep polling
+        except Exception:
+            pass
+        time.sleep(CALL_POLL_INTERVAL)
+
+    # 3 — Fingerprint the call. Skip the LLM for unreachable/timeout cases.
+    if not completed:
+        fp = _failed_fingerprint(clinic, "call did not complete within timeout")
+    elif not transcript:
+        fp = _failed_fingerprint(clinic, "call connected but no transcript captured")
+    else:
+        fp = fingerprint.run(clinic, transcript, requirements)
+    with lock:
+        out.append(fp)
+
+
+def run(candidates: list[dict], patient: dict, requirements: dict) -> list[dict]:
+    """Call every candidate clinic concurrently and return a fingerprint per call.
+
+    candidates   — list of clinic dicts from swarm-finder
+    patient      — profile dict from swarm-profiler
+                   (must include: name, language, insurance, specialty)
+    requirements — booking preferences from swarm-intake
+                   (time_pref, urgency, accessibility, gender_pref, ...)
+
+    Returns a list of fingerprint dicts (one per clinic) ready for swarm-matcher.
+    """
+    if not candidates:
+        return []
+
+    results: list[dict] = []
+    lock = threading.Lock()
+
+    threads = [
+        threading.Thread(
+            target=_call_one,
+            args=(clinic, patient, requirements, results, lock),
+            daemon=True,
+        )
+        for clinic in candidates
+    ]
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    return results

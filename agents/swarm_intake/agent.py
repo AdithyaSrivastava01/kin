@@ -1,15 +1,18 @@
-# swarm_intake — orchestrator agent (Engineer 1)
+# swarm_intake — orchestrator agent
+import json
 import threading
-from common.telemetry import beacon
+
 from common.asi import asi_chat
+from common.telemetry import beacon
 from agents.swarm_profiler import agent as profiler
-from agents.swarm_finder import agent as finder, FINDER_RADIUS_M
+from agents.swarm_finder import agent as finder
+from agents.swarm_finder.agent import FINDER_RADIUS_M
 from agents.swarm_matcher import agent as matcher
 from agents.swarm_caller import agent as caller
 
 
 def _parse_specialty(request_text: str) -> str:
-    """Use ASI:One to extract a clinic specialty keyword from a free-text request."""
+    """Extract a clinic specialty keyword from a free-text request via ASI:One."""
     return asi_chat(
         system=(
             "Extract the medical specialty from the patient request. "
@@ -22,29 +25,69 @@ def _parse_specialty(request_text: str) -> str:
     ).strip().lower()
 
 
+def _parse_requirements(request_text: str, profile: dict) -> dict:
+    """Extract per-conversation booking requirements from the patient's request.
+
+    These are the preferences the patient states for THIS booking — separate from
+    the permanent medical profile stored in MongoDB.
+
+    Returns a flat dict of requirements, e.g.:
+      {"specialty": "dermatologist", "time_pref": "morning",
+       "urgency": "this week", "gender_pref": "female",
+       "accessibility": "wheelchair", "insurance": "Aetna", "language": "Korean"}
+    """
+    raw = asi_chat(
+        system=(
+            "You are a medical scheduling assistant. "
+            "Extract the patient's booking requirements from their request. "
+            "Reply with ONLY valid JSON — no prose, no markdown:\n"
+            '{"specialty": "<or null>", '
+            '"time_pref": "<morning|afternoon|evening|weekend|ASAP|or null>", '
+            '"urgency": "<ASAP|this week|this month|flexible|or null>", '
+            '"gender_pref": "<male|female|no preference|or null>", '
+            '"accessibility": "<wheelchair|parking|elevator|or null>", '
+            '"other": "<any other requirement as a short string|or null>"}'
+        ),
+        user=request_text or f"Appointment for {profile.get('name', 'patient')}",
+        max_tokens=128,
+    )
+    try:
+        reqs = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        reqs = {}
+
+    # Always inject insurance + language from the patient profile so
+    # downstream agents have the full picture in one place.
+    reqs["insurance"] = profile.get("insurance")
+    reqs["language"]  = profile.get("language", "English")
+
+    # Drop null/empty values so prompts stay clean
+    return {k: v for k, v in reqs.items() if v}
+
+
 def run(db, patient_id: str, request_text: str = "", specialty: str | None = None) -> dict:
     """Orchestrate the full booking swarm for a patient.
 
-    1. Emits AppointmentRequest beacon.
-    2. Resolves specialty (from arg or LLM parse of request_text).
-    3. Fans out to profiler + finder in parallel threads.
-    4. Passes combined results to matcher → picks winning clinic.
-    5. Hands off to caller → triggers the Twilio call.
+    Flow:
+      1. Announce request (AppointmentRequest beacon).
+      2. Fan out to profiler + finder in parallel threads.
+      3. Parse per-conversation requirements from request_text via LLM.
+      4. swarm-caller calls ALL candidate clinics concurrently.
+         → After each call, swarm-fingerprint summarises the transcript.
+      5. swarm-matcher (LLM judge) picks the best clinic from fingerprints.
 
     Returns a summary dict of the booking outcome.
     """
-    # Step 1 — announce the request
     beacon("patient", "swarm-intake", "AppointmentRequest", {
         "patient_id": patient_id,
         "query": request_text or f"Appointment request for patient {patient_id}",
     })
 
-    # Step 2 — resolve specialty
+    # Resolve specialty early so finder can use it
     if not specialty:
         specialty = _parse_specialty(request_text) if request_text else "clinic"
 
-    # Step 3 — parallel fan-out to profiler and finder
-    profile: dict = {}
+    profile: dict    = {}
     candidates: list = []
 
     def _run_profiler():
@@ -52,7 +95,6 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
         profile.update(profiler.run(db, patient_id))
 
     def _run_finder():
-        # Need patient location — do a minimal fetch so finder can start
         p = db.patients.find_one({"patient_id": patient_id}, {"location": 1})
         if not p:
             return
@@ -63,7 +105,7 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
         candidates.extend(finder.run(db, p["location"], specialty))
 
     t_profiler = threading.Thread(target=_run_profiler, daemon=True)
-    t_finder = threading.Thread(target=_run_finder, daemon=True)
+    t_finder   = threading.Thread(target=_run_finder,   daemon=True)
     t_profiler.start()
     t_finder.start()
     t_profiler.join()
@@ -72,34 +114,34 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
     if not profile:
         return {"error": f"patient {patient_id!r} not found"}
 
-    # Step 4 — match
-    beacon("swarm-intake", "swarm-matcher", "ChatMessage", {
-        "candidates": [c["name"] for c in candidates[:3]],
-        "insurance": profile.get("insurance"),
-        "language": profile.get("language"),
+    profile["specialty"] = specialty
+    requirements = _parse_requirements(request_text, profile)
+
+    beacon("swarm-intake", "swarm-caller", "ChatMessage", {
+        "clinics":     [c["name"] for c in candidates[:3]],
+        "language":    requirements.get("language"),
+        "requirements": requirements,
     })
-    best = matcher.run(db, candidates, profile.get("insurance", ""), profile.get("language", "English"))
+    fingerprints = caller.run(candidates, profile, requirements)
+
+    if not fingerprints:
+        return {"error": "no clinics reachable", "profile": profile}
+
+    beacon("swarm-intake", "swarm-matcher", "ChatMessage", {
+        "fingerprints": len(fingerprints),
+        "requirements": requirements,
+    })
+    best = matcher.run(requirements, fingerprints)
 
     if not best:
         return {"error": "no clinic matched", "profile": profile}
 
-    # Step 5 — call
-    beacon("swarm-intake", "swarm-caller", "ChatMessage", {
-        "clinic": best.get("name"),
-        "phone": best.get("phone"),
-        "language": profile.get("language"),
-    })
-    # Pass specialty + time_pref through patient dict so caller can forward them
-    patient_ctx = {**profile, "specialty": specialty, "time_pref": None}
-    call_sid = caller.run(best, patient_ctx)
-
     return {
-        "patient_id": patient_id,
+        "patient_id":   patient_id,
         "patient_name": profile.get("name"),
-        "clinic": best.get("name"),
-        "phone": best.get("phone"),
-        "language": profile.get("language"),
-        "score": best.get("score"),
-        "rationale": best.get("rationale"),
-        "call_sid": call_sid,
+        "clinic":       best.get("name"),
+        "phone":        best.get("phone"),
+        "language":     profile.get("language"),
+        "rationale":    best.get("rationale"),
+        "requirements": requirements,
     }

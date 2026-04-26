@@ -41,8 +41,13 @@ twilio_client = TwilioClient(
 
 GEMMA_URL = os.getenv("GEMMA_VULTR_URL", "http://localhost:8088")
 NGROK_URL = os.getenv("NGROK_URL", "http://localhost:8000").rstrip("/")
+NGROK_AUTOSTART = os.getenv("NGROK_AUTOSTART", "false").lower() == "true"
+NGROK_AUTHTOKEN = os.getenv("NGROK_AUTHTOKEN")
+NGROK_PORT = int(os.getenv("NGROK_PORT", "8000"))
 CLIPS_DIR = "/tmp/healthswarm_clips"
 os.makedirs(CLIPS_DIR, exist_ok=True)
+
+_ngrok_tunnel = None  # populated when NGROK_AUTOSTART is true
 
 SUPPORTED_LANGUAGES = {"English", "Korean", "Spanish", "Hindi", "Marathi"}
 CLIP_MAX_AGE_S = 300  # delete WAV clips older than 5 minutes
@@ -59,11 +64,18 @@ _CALL_CONTEXT: dict[str, dict] = {}
 # Values: asyncio.Future resolving to {"status": "booked"|"failed"|"no_answer", ...}
 _CALL_OUTCOMES: dict[str, asyncio.Future] = {}
 
+# Transcript + result store — keyed by call SID, written when WS closes.
+# Read by swarm-fingerprint via GET /transcript/{call_sid}.
+_CALL_TRANSCRIPTS: dict[str, list[dict]] = {}
+_CALL_RESULTS: dict[str, dict] = {}
+_CALL_TIMESTAMPS: dict[str, float] = {}
+
+
 MAX_FALLTHROUGH_ATTEMPTS = 3
 
 
 async def _cleanup_clips_loop() -> None:
-    """Periodically delete WAV clips older than CLIP_MAX_AGE_S."""
+    """Periodically delete stale WAV clips and stale transcript-store entries."""
     while True:
         await asyncio.sleep(CLIP_CLEANUP_INTERVAL_S)
         now = time.time()
@@ -75,12 +87,64 @@ async def _cleanup_clips_loop() -> None:
                     removed += 1
             except OSError:
                 pass
-        if removed:
-            print(f"[cleanup] removed {removed} stale clips")
+        stale_sids = [
+            sid for sid, ts in _CALL_TIMESTAMPS.items() if now - ts > CLIP_MAX_AGE_S
+        ]
+        for sid in stale_sids:
+            _CALL_TRANSCRIPTS.pop(sid, None)
+            _CALL_RESULTS.pop(sid, None)
+            _CALL_TIMESTAMPS.pop(sid, None)
+        if removed or stale_sids:
+            print(
+                f"[cleanup] removed {removed} clips, {len(stale_sids)} transcript entries"
+            )
+
+
+def _open_ngrok_tunnel() -> str | None:
+    """Open an ngrok HTTPS tunnel to NGROK_PORT, return the public URL.
+
+    Called only when NGROK_AUTOSTART=true. Updates the module-level NGROK_URL
+    so initiate_call() and clip-serving paths use the live tunnel without any
+    copy-paste step.
+    """
+    global NGROK_URL, _ngrok_tunnel
+    try:
+        from pyngrok import conf, ngrok
+    except ImportError:
+        print(
+            "[ngrok] NGROK_AUTOSTART=true but pyngrok not installed — "
+            "run `pip install pyngrok` or set NGROK_AUTOSTART=false"
+        )
+        return None
+
+    if NGROK_AUTHTOKEN:
+        conf.get_default().auth_token = NGROK_AUTHTOKEN
+
+    _ngrok_tunnel = ngrok.connect(NGROK_PORT, "http", bind_tls=True)
+    NGROK_URL = _ngrok_tunnel.public_url.rstrip("/")
+    print(f"[ngrok] tunnel open: {NGROK_URL} -> http://localhost:{NGROK_PORT}")
+    return NGROK_URL
+
+
+@app.on_event("shutdown")
+async def _close_ngrok():
+    """Disconnect the auto-started tunnel when the server stops."""
+    global _ngrok_tunnel
+    if _ngrok_tunnel is not None:
+        try:
+            from pyngrok import ngrok
+
+            ngrok.disconnect(_ngrok_tunnel.public_url)
+            ngrok.kill()
+            print("[ngrok] tunnel closed")
+        except Exception as e:
+            print(f"[ngrok] shutdown error (non-fatal): {e!r}")
 
 
 @app.on_event("startup")
 async def _prewarm():
+    if NGROK_AUTOSTART:
+        _open_ngrok_tunnel()
     asyncio.create_task(_cleanup_clips_loop())
     loop = asyncio.get_event_loop()
     for lang in SUPPORTED_LANGUAGES:
@@ -91,7 +155,11 @@ async def _prewarm():
             _FILLER_CACHE[lang] = raw
             print(f"[prewarm] filler/{lang}: {len(raw)} bytes")
         except Exception as e:
-            print(f"[prewarm] filler/{lang} failed: {e!r}")
+            detail = getattr(e, "body", None) or getattr(e, "message", None) or str(e)
+            status = getattr(e, "status_code", None)
+            print(
+                f"[prewarm] filler/{lang} failed: {type(e).__name__} status={status} detail={detail!r}"
+            )
 
 
 # ── Outbound call trigger (called by swarm-caller agent) ────────────
@@ -323,11 +391,19 @@ async def call_ws(ws: WebSocket):
                 if convo:
                     outcome["booking_status"] = convo.booking_status
                     outcome["turns"] = convo.turns
+                if call_sid:
+                    _CALL_TRANSCRIPTS[call_sid] = list(convo.history) if convo else []
+                    _CALL_RESULTS[call_sid] = outcome
+                    _CALL_TIMESTAMPS[call_sid] = time.time()
                 report_call_outcome(call_sid, outcome)
                 break
 
     except Exception as e:
         print(f"[ws] error: {e!r}")
+        if call_sid:
+            _CALL_TRANSCRIPTS[call_sid] = []
+            _CALL_RESULTS[call_sid] = {"status": "failed", "error": str(e)}
+            _CALL_TIMESTAMPS[call_sid] = time.time()
         report_call_outcome(call_sid, {"status": "failed", "error": str(e)})
 
 
@@ -545,6 +621,27 @@ async def play_filler(req: Request):
         "audio_b64": base64.b64encode(audio).decode("ascii"),
         "format": "ulaw_8000",
         "language": lang,
+    }
+
+
+# ── Transcript retrieval (read by swarm-fingerprint) ─────────────────
+
+
+@app.get("/transcript/{call_sid}")
+def get_transcript(call_sid: str):
+    """Return the transcript + result for a completed call.
+
+    Returns 202 while the call is still in progress.
+    call_sid must be a Twilio call SID (CA followed by 32 alphanumerics).
+    """
+    if not re.fullmatch(r"CA[A-Za-z0-9]{32}", call_sid):
+        return JSONResponse({"error": "invalid call_sid"}, status_code=400)
+    if call_sid not in _CALL_RESULTS:
+        return JSONResponse({"status": "pending"}, status_code=202)
+    return {
+        "call_sid": call_sid,
+        "transcript": _CALL_TRANSCRIPTS.get(call_sid, []),
+        "result": _CALL_RESULTS[call_sid],
     }
 
 

@@ -21,6 +21,7 @@ import os
 import random
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 
 import requests
@@ -67,20 +68,36 @@ def build_scenario(db, patient_id: str) -> list[Event]:
         }},
     }).limit(5))
 
-    # Insurance match — real lookup against insurance_map collection
+    # Insurance acceptance — uses new clinic_insurance collection (FK on insurance_id)
     insured = []
     for c in candidates:
-        m = db.insurance_map.find_one({"clinic_name": c["name"]})
-        accepted = m and p["insurance"]["provider"] in m.get("accepts", [])
+        m = db.clinic_insurance.find_one({"clinic_name": c["name"]})
+        accepted = m and p.get("insurance_id") in m.get("accepts", [])
         if accepted:
             insured.append(c)
     matched = (insured or candidates)[0] if (insured or candidates) else None
 
+    # On-the-go AI medical record — generated lazily by swarm-profiler.
+    # Falls back to a deterministic stub if ASI:One is unavailable.
+    try:
+        # Lazy import — sim still works if common/medical.py isn't on disk
+        from common.medical import generate_medical_record
+        med = generate_medical_record(patient_id)
+    except Exception as e:
+        print(f"  [sim] medical generator failed ({e!r}) — using empty fallback")
+        med = {"medications": [], "allergies": [], "diagnoses": [],
+               "ai_notes": "(no record)", "generated_by": "missing"}
+
+    outreach_id = uuid.uuid4().hex[:12]
+
     events: list[Event] = [
         Event("patient", "swarm-intake", "AppointmentRequest", {
-            "patient_id": patient_id,
-            "query": f"{p['name']} needs an appointment {scenario['ask']}.",
-            "language": p["primary_language"],
+            "outreach_id":  outreach_id,
+            "patient_id":   patient_id,
+            "patient_name": p["name"],
+            "query":        f"{p['name']} needs an appointment {scenario['ask']}.",
+            "language":     p["primary_language"],
+            "specialty":    specialty,
         }, delay=0.0),
 
         # Fan out to profiler + finder in parallel (small gap)
@@ -94,36 +111,41 @@ def build_scenario(db, patient_id: str) -> list[Event]:
             "radius_km": 15,
         }, delay=0.1),
 
-        # Profiler returns first (Mongo lookup is fast)
+        # Profiler returns first (medical_records lookup + AI generation if missing)
         Event("swarm-profiler", "swarm-intake", "ProfileLoaded", {
-            "name": p["name"],
-            "language": p["primary_language"],
-            "insurance": p["insurance"]["provider"],
-            "allergies": p.get("allergies", []),
-            "medications": [m["name"] for m in p.get("medications", [])],
+            "name":          p["name"],
+            "language":      p["primary_language"],
+            "insurance_id":  p.get("insurance_id"),
+            "allergies":     med.get("allergies", []),
+            "medications":   [m["name"] for m in med.get("medications", [])],
+            "diagnoses":     med.get("diagnoses", []),
+            "generated_by":  med.get("generated_by", "?"),
+            "ai_notes":      med.get("ai_notes", "")[:160],
         }, delay=0.9),
 
-        # Finder returns slightly later (Overpass-style search took longer)
+        # Finder returns slightly later (geo query)
         Event("swarm-finder", "swarm-intake", "CandidatesFound", {
-            "specialty": specialty,
-            "count": len(candidates),
-            "top": [c["name"] for c in candidates[:3]],
+            "outreach_id": outreach_id,
+            "specialty":   specialty,
+            "count":       len(candidates),
+            "top":         [c["name"] for c in candidates[:3]],
         }, delay=1.4),
 
         # Hand off to matcher
         Event("swarm-intake", "swarm-matcher", "ChatMessage", {
-            "candidates": [c["name"] for c in candidates[:3]],
-            "language": p["primary_language"],
-            "insurance": p["insurance"]["provider"],
+            "candidates":   [c["name"] for c in candidates[:3]],
+            "language":     p["primary_language"],
+            "insurance_id": p.get("insurance_id"),
         }, delay=0.7),
 
         # Matcher picks the winner
         Event("swarm-matcher", "swarm-intake", "ClinicMatched", {
-            "clinic": matched["name"] if matched else None,
-            "address": (matched or {}).get("address"),
-            "phone": (matched or {}).get("phone") or "+1-555-DEMO",
-            "score": round(random.uniform(0.78, 0.96), 2),
-            "rationale": "specialty + insurance + proximity",
+            "outreach_id": outreach_id,
+            "clinic":      matched["name"] if matched else None,
+            "address":     (matched or {}).get("address"),
+            "phone":       (matched or {}).get("phone") or "+1-555-DEMO",
+            "score":       round(random.uniform(0.78, 0.96), 2),
+            "rationale":   "specialty + insurance_id + proximity",
         }, delay=1.1),
 
         # Hand the booking task to swarm-caller (E2's voice gateway will
@@ -148,7 +170,7 @@ def run_once(events: list[Event], speed: float = 1.0) -> int:
             r = requests.post(RELAY, json={
                 "src": evt.src, "dst": evt.dst,
                 "kind": evt.kind, "payload": evt.payload,
-            }, timeout=2)
+            }, timeout=5)
             ok = r.ok
         except Exception as e:
             print(f"  [warn] beacon failed: {e!r}")

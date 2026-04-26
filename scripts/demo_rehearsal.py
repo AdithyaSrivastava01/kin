@@ -23,6 +23,9 @@ import os
 import sys
 import time
 
+# Ensure project root is on sys.path so `common` and `scripts.sim_swarm` resolve
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import requests
 from dotenv import load_dotenv
 
@@ -30,7 +33,9 @@ load_dotenv()
 
 RELAY = os.getenv("TELEMETRY_RELAY_URL", "http://localhost:3001/telemetry")
 RELAY_BASE = RELAY.rsplit("/telemetry", 1)[0]
-GATEWAY = os.getenv("NGROK_URL", "").rstrip("/")
+# Talk to the local gateway directly — ngrok is only needed by Twilio
+# (to reach the gateway from the public internet), not by this script.
+GATEWAY = os.getenv("VOICE_GATEWAY_URL", "http://localhost:8000").rstrip("/")
 
 PATIENT_LANG = {
     "joon-001":  "Korean",
@@ -62,14 +67,22 @@ def health_check() -> bool:
     return ok
 
 
-def run_swarm_graph(patient_id: str) -> int:
-    """Reuse sim_swarm to emit the agent-graph events."""
+def run_swarm_graph(patient_id: str):
+    """Reuse sim_swarm to emit the agent-graph events.
+
+    Returns (failed_count, outreach_id) so the caller can attach the same
+    outreach_id to subsequent mocked voice beacons.
+    """
     # Defer import so the rehearsal works even if pymongo isn't installed
     # on a demo box (only sim_swarm needs it)
+    import certifi
     from sim_swarm import build_scenario, run_once  # type: ignore
     from pymongo import MongoClient
-    db = MongoClient(os.getenv("MONGO_URI"))["healthswarm"]
-    return run_once(build_scenario(db, patient_id), speed=1.0)
+    db = MongoClient(os.getenv("MONGO_URI"), tlsCAFile=certifi.where())["healthswarm"]
+    events = build_scenario(db, patient_id)
+    outreach_id = (events[0].payload.get("outreach_id") if events else None)
+    failed = run_once(events, speed=1.0)
+    return failed, outreach_id
 
 
 def run_real_call(to_number: str, patient_lang: str, patient_name: str, specialty: str):
@@ -77,8 +90,15 @@ def run_real_call(to_number: str, patient_lang: str, patient_name: str, specialt
     Beacons (CallStarted, LanguageDetected, BookingResult) come from the
     voice_gateway side, not from us — we just kick it off.
     """
-    if not GATEWAY:
-        raise SystemExit("NGROK_URL not set — cannot place real call")
+    try:
+        h = requests.get(f"{GATEWAY}/health", timeout=3)
+        if h.status_code != 200:
+            raise SystemExit(f"voice_gateway /health returned {h.status_code}")
+    except Exception as e:
+        raise SystemExit(
+            f"voice_gateway not reachable at {GATEWAY} ({e!r})\n"
+            "Start it with: python -m uvicorn voice_gateway.main:app --port 8000"
+        )
     payload = {
         "to": to_number,
         "language": patient_lang,
@@ -108,7 +128,7 @@ def main():
 
     # Phase A — agent graph (intake → profiler/finder → matcher → caller)
     print("\n[A] Swarm coordinates the booking")
-    failed = run_swarm_graph(args.patient)
+    failed, outreach_id = run_swarm_graph(args.patient)
     if failed:
         print(f"  ! {failed} beacon(s) failed during graph run")
         return 1
@@ -135,16 +155,30 @@ def main():
         print()
     else:
         # Mock E2's beacons so the dashboard tells the full story even
-        # without a real call placed.
+        # without a real call placed. Carry the outreach_id forward so
+        # the relay can correlate everything into one outreach_attempts row.
         step("CallStarted (mock)", 0.4)
-        beacon("swarm-caller", "clinic", "CallStarted",
-               {"to": "+1-555-DEMO", "from": os.getenv("TWILIO_PHONE_NUMBER", "+1-555-AGENT")})
+        beacon("swarm-caller", "clinic", "CallStarted", {
+            "outreach_id": outreach_id,
+            "call_sid":    f"MOCK-{outreach_id}",
+            "to":          "+1-555-DEMO",
+            "from":        os.getenv("TWILIO_PHONE_NUMBER", "+1-555-AGENT"),
+        })
         step(f"LanguageDetected: {lang} (mock — would be real with E2's gateway)", 1.5)
-        beacon("swarm-caller", "clinic", "LanguageDetected",
-               {"language": lang, "latency_ms": 2400, "mocked": True})
+        beacon("swarm-caller", "clinic", "LanguageDetected", {
+            "outreach_id": outreach_id,
+            "language":    lang,
+            "latency_ms":  2400,
+            "mocked":      True,
+        })
         step("BookingResult (mock)", 3.0)
-        beacon("swarm-caller", "clinic", "BookingResult",
-               {"outcome": "booked", "when": "Thu 2pm", "language": lang, "mocked": True})
+        beacon("swarm-caller", "clinic", "BookingResult", {
+            "outreach_id": outreach_id,
+            "outcome":     "booked",
+            "when":        "Thu 2pm",
+            "language":    lang,
+            "mocked":      True,
+        })
 
     print("\n=== rehearsal complete — check the dashboard ===\n")
     return 0
