@@ -54,87 +54,16 @@ The project also includes a live Next.js war-room dashboard. It streams agent te
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    subgraph Interfaces["User Interfaces"]
-        AV["Agentverse / ASI:One Chat"]
-        OC["OmegaClaw Telegram Skill"]
-        UI["Next.js Dashboard<br/>Outreach + War Room"]
-    end
+![HealthSwarm system architecture — interfaces, agentverse swarm, services, MongoDB Atlas, all funnelled through an SSE relay](docs/architecture.jpeg)
 
-    subgraph Swarm["HealthSwarm Agent Layer"]
-        Intake["healthswarm-intake<br/>orchestrator + bridge"]
-        Profiler["healthswarm-profiler<br/>patient profile"]
-        Finder["healthswarm-finder<br/>clinic geo-search"]
-        Matcher["healthswarm-matcher<br/>LLM ranking + judge"]
-        Caller["healthswarm-caller<br/>parallel outreach"]
-        Fingerprint["healthswarm-fingerprint<br/>translate + extract facts"]
-    end
+Four horizontal layers, top to bottom:
 
-    subgraph Services["Service Layer"]
-        Relay["dashboard_relay<br/>FastAPI + SSE + GridFS"]
-        Voice["voice_gateway<br/>FastAPI call shim"]
-        Eleven["ElevenLabs Conversational AI<br/>STT + LLM + TTS + Twilio"]
-        ASI["ASI:One<br/>OpenAI-compatible chat API"]
-    end
+- **Interfaces** — Web (Next.js dashboard) + Twilio inbound
+- **Agentverse Swarm** — the six agent nodes (intake, profiler, finder, matcher, caller, fingerprint)
+- **Services** — ElevenLabs Conversational AI for the call leg + ASI:One for every LLM decision
+- **MongoDB Atlas** — patients, clinics, medical_records, fingerprints, outreach_attempts, GridFS
 
-    subgraph Data["MongoDB Atlas Data Layer"]
-        Patients[(patients)]
-        Insurers[(insurance_companies)]
-        ClinicInsurance[(clinic_insurance)]
-        Clinics[(clinics<br/>2dsphere index)]
-        Medical[(medical_records)]
-        Fingerprints[(fingerprints)]
-        Outreach[(outreach_attempts)]
-        GridFS[(GridFS<br/>patient documents)]
-    end
-
-    AV --> Intake
-    OC -->|"POST /book"| Intake
-    UI <-->|"GET /stream + REST"| Relay
-
-    Intake --> Profiler
-    Intake --> Finder
-    Intake --> Matcher
-    Intake --> Caller
-    Caller --> Fingerprint
-    Fingerprint --> Matcher
-
-    Profiler --> Patients
-    Profiler --> Insurers
-    Profiler --> Medical
-    Finder --> Clinics
-    Matcher --> ASI
-    Intake --> ASI
-    Fingerprint --> ASI
-
-    Caller -->|"POST /call"| Voice
-    Voice --> Eleven
-    Eleven -->|"Twilio outbound call"| Clinic["Clinic receptionist"]
-    Voice -->|"GET /transcript/{call_sid}"| Caller
-    Caller --> Fingerprints
-
-    Profiler -. beacons .-> Relay
-    Finder -. beacons .-> Relay
-    Matcher -. beacons .-> Relay
-    Caller -. beacons .-> Relay
-    Fingerprint -. beacons .-> Relay
-    Relay --> Outreach
-    Relay --> GridFS
-    Relay --> Patients
-
-    classDef iface fill:#EFF6FF,stroke:#2563EB,stroke-width:2px,color:#0F172A
-    classDef agent fill:#F8FAFC,stroke:#7C3AED,stroke-width:2px,color:#111827
-    classDef svc fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#064E3B
-    classDef data fill:#FFFBEB,stroke:#D97706,stroke-width:2px,color:#78350F
-    classDef clinic fill:#FEF2F2,stroke:#DC2626,stroke-width:2px,color:#7F1D1D
-
-    class AV,OC,UI iface
-    class Intake,Profiler,Finder,Matcher,Caller,Fingerprint agent
-    class Relay,Voice,Eleven,ASI svc
-    class Patients,Insurers,ClinicInsurance,Clinics,Medical,Fingerprints,Outreach,GridFS data
-    class Clinic clinic
-```
+All four layers stream live state through the **SSE Relay** on the right edge, which is what powers the real-time dashboard.
 
 ### Booking Flow
 
