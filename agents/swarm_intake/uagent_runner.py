@@ -70,7 +70,18 @@ def _format_reply(result: dict) -> str:
         f"Language:  {result.get('language', 'English')}",
     ]
     if result.get("rationale"):
-        lines.append(f"Why:       {result['rationale']}")
+        rationale = result["rationale"]
+        # Strip markdown code fences and JSON blobs from the rationale
+        if rationale.startswith("```") or rationale.startswith("{"):
+            rationale = "Appointment confirmed based on availability and insurance match"
+        lines.append(f"Why:       {rationale}")
+    if result.get("match_score") is not None and result["match_score"] > 0:
+        lines.append(f"Score:     {result['match_score']}/100")
+    if result.get("attempts"):
+        lines.append(f"Attempts:  {result['attempts']}")
+    call_summary = result.get("call_summary", "")
+    if call_summary and not call_summary.startswith("{") and not call_summary.startswith("```"):
+        lines.append(f"Call:      {call_summary}")
     reqs = result.get("requirements", {})
     if reqs.get("time_pref"):
         lines.append(f"Time pref: {reqs['time_pref']}")
@@ -174,5 +185,58 @@ async def handle_booking_request(ctx: Context, sender: str, msg: BookingRequest)
     await ctx.send(sender, BookingResponse(result=reply))
 
 
+# ── HTTP booking bridge ─────────────────────────────────────────────────────
+# Docker containers reach this via http://host.docker.internal:$PORT/book.
+# Bypasses uAgents envelope version issues between OmegaClaw and the host.
+
+import json as _json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+class _BookingHandler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):  # silence access log
+        pass
+
+    def do_POST(self):
+        if self.path != "/book":
+            self.send_error(404)
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+        try:
+            payload = _json.loads(body)
+            query = payload.get("query", "")
+            patient_id, request_text = _resolve_patient(query)
+
+            from pymongo import MongoClient
+            from agents.swarm_intake import agent as intake_agent
+
+            db = MongoClient(os.environ["MONGO_URI"]).get_default_database()
+            result = intake_agent.run(
+                db, patient_id=patient_id, request_text=request_text
+            )
+            reply = _format_reply(result)
+            response = _json.dumps({"result": reply}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(response)
+        except Exception as exc:
+            err = _json.dumps({"error": str(exc)}).encode()
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(err)
+
+
+def _start_bridge():
+    port = int(os.getenv("OMEGACLAW_BRIDGE_PORT", "8015"))
+    server = HTTPServer(("0.0.0.0", port), _BookingHandler)
+    print(f"[bridge] Booking bridge listening on :{port}")
+    server.serve_forever()
+
+
 if __name__ == "__main__":
+    threading.Thread(target=_start_bridge, daemon=True).start()
     agent.run()

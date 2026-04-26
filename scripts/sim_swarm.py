@@ -138,14 +138,18 @@ def build_scenario(db, patient_id: str) -> list[Event]:
             "insurance_id": p.get("insurance_id"),
         }, delay=0.7),
 
-        # Matcher picks the winner
-        Event("swarm-matcher", "swarm-intake", "ClinicMatched", {
-            "outreach_id": outreach_id,
-            "clinic":      matched["name"] if matched else None,
-            "address":     (matched or {}).get("address"),
-            "phone":       (matched or {}).get("phone") or "+1-555-DEMO",
-            "score":       round(random.uniform(0.78, 0.96), 2),
-            "rationale":   "specialty + insurance_id + proximity",
+        # Matcher ranks candidates before any call is placed
+        Event("swarm-matcher", "swarm-intake", "ClinicRanked", {
+            "count": len(candidates),
+            "top": [
+                {
+                    "name": c["name"],
+                    "score": round(random.uniform(78, 96), 0),
+                    "disqualified": False,
+                    "rationale": "specialty + insurance + proximity",
+                }
+                for c in (insured or candidates)[:5]
+            ],
         }, delay=1.1),
 
         # Hand the booking task to swarm-caller (E2's voice gateway will

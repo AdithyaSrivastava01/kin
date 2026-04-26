@@ -13,12 +13,13 @@ Books medical appointments by dispatching a 5-agent swarm:
 | healthswarm-intake | Orchestrator — routes requests, coordinates swarm |
 | healthswarm-profiler | Retrieves patient medical history from MongoDB |
 | healthswarm-finder | Geospatial clinic search (MongoDB 2dsphere, 15 km radius) |
-| healthswarm-fingerprint | Summarises each call transcript into structured facts |
-| healthswarm-matcher | LLM judge — ranks clinics and picks the best fit |
+| healthswarm-matcher | LLM judge — ranks clinics concurrently before calling |
+| healthswarm-caller | Calls ranked clinics with up to 3 fallback attempts |
+| healthswarm-fingerprint | Summarises completed call transcripts into structured facts |
 
-The voice gateway places concurrent Twilio calls to all candidate clinics, detects the
-receptionist's language on first utterance via Gemma E4B, and switches the ElevenLabs
-TTS voice automatically mid-call.
+The voice gateway calls the best-ranked clinic first, detects the receptionist's
+language on first utterance via Gemma E4B, switches the ElevenLabs TTS voice
+automatically mid-call, and falls through to the next ranked clinic if booking fails.
 
 ## Supported demo personas
 
@@ -71,7 +72,7 @@ Add this function definition:
 
 ```metta
 (= (healthswarm-booking $query)
-   (py-call (agentverse.healthswarm_skill $query)))
+   (py-call (agentverse.healthswarm_booking $query)))
 ```
 
 See `skills.metta.snippet` in this folder for the exact lines to paste.
@@ -111,6 +112,7 @@ Why:       Closest dermatologist accepting their insurance; Korean-speaking staf
 
 - **Two protocols on one agent:** healthswarm-intake handles `BookingRequest` (OmegaClaw)
   and `ChatMessage` via Chat Protocol (ASI:One direct chat) on the same port 8010.
-- **No ngrok needed:** OmegaClaw polls Telegram outbound; healthswarm-intake is reached
-  directly via the Almanac address resolution.
+- **No ngrok needed for OmegaClaw:** OmegaClaw polls Telegram outbound; healthswarm-intake
+  is reached directly via the Almanac address resolution. Twilio calls still require
+  `NGROK_URL` for Media Streams.
 - **All LLM reasoning uses ASI:One** (`asi1` model via `https://api.asi1.ai/v1`).

@@ -6,7 +6,7 @@ What to start, in what order, and what to watch for during the live demo.
 
 ```bash
 # 1. Python deps
-python -m pip install pymongo requests python-dotenv certifi fastapi uvicorn
+python -m pip install pymongo requests python-dotenv certifi fastapi uvicorn uagents uagents-core openai
 
 # 2. Node deps
 cd healthswarm-dashboard && npm install && cd ..
@@ -62,6 +62,14 @@ Set `NGROK_URL` in `.env` to whatever ngrok prints.
 
 **Terminal 4 — demo trigger (the one you use during the talk)**
 This is the only one you touch on stage.
+
+**OmegaClaw / Agentverse agents**
+```bash
+for agent in swarm_intake swarm_profiler swarm_finder swarm_matcher swarm_caller swarm_fingerprint; do
+  PYTHONPATH=. .venv/bin/python -m agents.${agent}.uagent_runner >> /tmp/hs-${agent}.log 2>&1 &
+done
+bash scripts/setup_omegaclaw.sh
+```
 
 ## Running the demo
 
@@ -127,10 +135,10 @@ Counts buffered events and connected dashboard subscribers.
 | Intake → profiler (green) | MongoDB lookup of medical history |
 | Intake → finder (green, parallel) | OSM-derived clinic search via 2dsphere `$near` |
 | Finder → intake CandidatesFound | 5 real LA clinics returned, names from OSM |
-| Intake → matcher (green) | Insurance + language + proximity ranking |
-| Matcher → intake ClinicMatched (orange) | Winning clinic + score |
-| Intake → caller (green) | Booking task handoff |
-| Caller → clinic CallStarted (red) | Twilio dials the receptionist |
+| Intake → matcher (green) | Parallel ASI:One scoring of candidate clinics |
+| Matcher → intake ClinicRanked (orange) | Ranked clinics + scores |
+| Intake → caller (green) | Ranked booking task handoff |
+| Caller → clinic CallStarted (red) | Twilio dials the best-ranked receptionist first |
 | **🌐 amber banner + amber edge** | **Gemma E4B detected non-English; ElevenLabs switched voice** |
 | Caller → clinic BookingResult (red) | Appointment confirmed |
 

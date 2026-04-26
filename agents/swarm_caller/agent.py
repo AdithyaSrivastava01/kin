@@ -13,6 +13,7 @@ DEMO_PHONE_FALLBACK = os.getenv("DEMO_PHONE_FALLBACK",  "+1-555-DEMO")
 VOICE_GW_TIMEOUT    = float(os.getenv("VOICE_GW_TIMEOUT",    "10"))
 CALL_POLL_INTERVAL  = float(os.getenv("CALL_POLL_INTERVAL_S", "5"))
 CALL_MAX_WAIT       = float(os.getenv("CALL_MAX_WAIT_S",      "150"))
+MAX_FALLBACK_ATTEMPTS = int(os.getenv("MAX_FALLBACK_ATTEMPTS", "3"))
 
 
 def _failed_fingerprint(clinic: dict, reason: str) -> dict:
@@ -70,6 +71,7 @@ def _call_one(
 
     # 2 — Poll /transcript/{call_sid} until the call finishes or we time out
     transcript: list = []
+    call_result: dict = {}
     completed = False
     deadline = time.time() + CALL_MAX_WAIT
     while time.time() < deadline:
@@ -79,7 +81,9 @@ def _call_one(
                 timeout=5,
             )
             if r.status_code == 200:
-                transcript = r.json().get("transcript", [])
+                payload = r.json()
+                transcript = payload.get("transcript", [])
+                call_result = payload.get("result", {})
                 completed = True
                 break
             # 202 = still in progress, keep polling
@@ -94,6 +98,8 @@ def _call_one(
         fp = _failed_fingerprint(clinic, "call connected but no transcript captured")
     else:
         fp = fingerprint.run(clinic, transcript, requirements)
+        if isinstance(call_result, dict):
+            fp["result"] = call_result
     with lock:
         out.append(fp)
 
@@ -130,3 +136,47 @@ def run(candidates: list[dict], patient: dict, requirements: dict) -> list[dict]
         t.join()
 
     return results
+
+
+def call_ranked(ranked_clinics: list[dict], patient: dict, requirements: dict) -> dict:
+    """Call ranked clinics in order until one books or fallback attempts are exhausted."""
+    attempts = []
+    for idx, clinic in enumerate(ranked_clinics[:MAX_FALLBACK_ATTEMPTS], 1):
+        phone = clinic.get("phone") or DEMO_PHONE_FALLBACK
+        beacon("swarm-caller", "clinic", "CallAttempt", {
+            "attempt": idx,
+            "clinic": clinic.get("name"),
+            "phone": phone,
+            "match_score": clinic.get("match_score"),
+        })
+
+        out: list[dict] = []
+        lock = threading.Lock()
+        _call_one(clinic, patient, requirements, out, lock)
+        fingerprint_result = out[0] if out else _failed_fingerprint(
+            clinic, "call ended without a fingerprint"
+        )
+        attempts.append(fingerprint_result)
+
+        available = fingerprint_result.get("available")
+        result = fingerprint_result.get("result", {})
+        status = result.get("status") if isinstance(result, dict) else None
+        booked = status == "booked" or available is True
+
+        beacon("swarm-caller", "swarm-intake", "CallAttemptResult", {
+            "attempt": idx,
+            "clinic": clinic.get("name"),
+            "booked": booked,
+            "available": available,
+            "summary": fingerprint_result.get("summary"),
+        })
+
+        if booked:
+            return {
+                "status": "booked",
+                "clinic": clinic,
+                "fingerprint": fingerprint_result,
+                "attempts": attempts,
+            }
+
+    return {"status": "exhausted", "attempts": attempts}

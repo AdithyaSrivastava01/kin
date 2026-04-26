@@ -72,9 +72,8 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
       1. Announce request (AppointmentRequest beacon).
       2. Fan out to profiler + finder in parallel threads.
       3. Parse per-conversation requirements from request_text via LLM.
-      4. swarm-caller calls ALL candidate clinics concurrently.
-         → After each call, swarm-fingerprint summarises the transcript.
-      5. swarm-matcher (LLM judge) picks the best clinic from fingerprints.
+      4. swarm-matcher scores candidate clinics concurrently.
+      5. swarm-caller calls ranked clinics in order with up to 3 fallback attempts.
 
     Returns a summary dict of the booking outcome.
     """
@@ -111,37 +110,48 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
     t_profiler.join()
     t_finder.join()
 
-    if not profile:
+    if not profile or profile.get("error") == "PROFILE_NOT_FOUND":
         return {"error": f"patient {patient_id!r} not found"}
 
     profile["specialty"] = specialty
     requirements = _parse_requirements(request_text, profile)
 
-    beacon("swarm-intake", "swarm-caller", "ChatMessage", {
-        "clinics":     [c["name"] for c in candidates[:3]],
+    beacon("swarm-intake", "swarm-matcher", "ChatMessage", {
+        "candidates": len(candidates),
         "language":    requirements.get("language"),
         "requirements": requirements,
     })
-    fingerprints = caller.run(candidates, profile, requirements)
+    ranked = matcher.rank_candidates(profile, requirements, candidates)
 
-    if not fingerprints:
-        return {"error": "no clinics reachable", "profile": profile}
+    if not ranked:
+        return {"error": "no clinic candidates found", "profile": profile}
 
-    beacon("swarm-intake", "swarm-matcher", "ChatMessage", {
-        "fingerprints": len(fingerprints),
+    beacon("swarm-intake", "swarm-caller", "ChatMessage", {
+        "clinics": [c["name"] for c in ranked[:3]],
         "requirements": requirements,
     })
-    best = matcher.run(requirements, fingerprints)
+    booking = caller.call_ranked(ranked, profile, requirements)
 
-    if not best:
-        return {"error": "no clinic matched", "profile": profile}
+    if booking.get("status") != "booked":
+        return {
+            "error": "no clinic booked after fallback attempts",
+            "profile": profile,
+            "ranked": ranked[:5],
+            "attempts": booking.get("attempts", []),
+        }
+
+    best = booking.get("clinic", {})
+    fp = booking.get("fingerprint", {})
 
     return {
         "patient_id":   patient_id,
         "patient_name": profile.get("name"),
         "clinic":       best.get("name"),
         "phone":        best.get("phone"),
-        "language":     profile.get("language"),
-        "rationale":    best.get("rationale"),
+        "language":     fp.get("result", {}).get("language") or profile.get("language"),
+        "rationale":    best.get("rationale") or fp.get("summary"),
+        "match_score":  best.get("match_score"),
+        "attempts":     len(booking.get("attempts", [])),
+        "call_summary": fp.get("summary"),
         "requirements": requirements,
     }

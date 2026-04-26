@@ -5,7 +5,7 @@ agentverse.py. OmegaClaw calls healthswarm_booking() via py-call from MeTTa.
 
 Usage from skills.metta:
     (= (healthswarm-booking $query)
-       (py-call (agentverse.healthswarm_skill $query)))
+       (py-call (agentverse.healthswarm_booking $query)))
 """
 import asyncio
 import json
@@ -63,3 +63,8 @@ def healthswarm_booking(query: str, timeout: int = 180) -> str:
             return raw
     except Exception as e:
         return f"error: {e}"
+
+
+def healthswarm_skill(query: str, timeout: int = 180) -> str:
+    """Backward-compatible alias for older skills.metta snippets."""
+    return healthswarm_booking(query, timeout)
