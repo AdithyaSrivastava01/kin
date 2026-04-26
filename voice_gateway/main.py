@@ -41,8 +41,13 @@ twilio_client = TwilioClient(
 
 GEMMA_URL = os.getenv("GEMMA_VULTR_URL", "http://localhost:8088")
 NGROK_URL = os.getenv("NGROK_URL", "http://localhost:8000").rstrip("/")
+NGROK_AUTOSTART  = os.getenv("NGROK_AUTOSTART", "false").lower() == "true"
+NGROK_AUTHTOKEN  = os.getenv("NGROK_AUTHTOKEN")
+NGROK_PORT       = int(os.getenv("NGROK_PORT", "8000"))
 CLIPS_DIR = "/tmp/healthswarm_clips"
 os.makedirs(CLIPS_DIR, exist_ok=True)
+
+_ngrok_tunnel = None  # populated when NGROK_AUTOSTART is true
 
 SUPPORTED_LANGUAGES = {"English", "Korean", "Spanish", "Hindi", "Marathi"}
 CLIP_MAX_AGE_S = 300  # delete WAV clips older than 5 minutes
@@ -91,8 +96,48 @@ async def _cleanup_clips_loop() -> None:
             print(f"[cleanup] removed {removed} clips, {len(stale_sids)} transcript entries")
 
 
+def _open_ngrok_tunnel() -> str | None:
+    """Open an ngrok HTTPS tunnel to NGROK_PORT, return the public URL.
+
+    Called only when NGROK_AUTOSTART=true. Updates the module-level NGROK_URL
+    so initiate_call() and clip-serving paths use the live tunnel without any
+    copy-paste step.
+    """
+    global NGROK_URL, _ngrok_tunnel
+    try:
+        from pyngrok import conf, ngrok
+    except ImportError:
+        print("[ngrok] NGROK_AUTOSTART=true but pyngrok not installed — "
+              "run `pip install pyngrok` or set NGROK_AUTOSTART=false")
+        return None
+
+    if NGROK_AUTHTOKEN:
+        conf.get_default().auth_token = NGROK_AUTHTOKEN
+
+    _ngrok_tunnel = ngrok.connect(NGROK_PORT, "http", bind_tls=True)
+    NGROK_URL = _ngrok_tunnel.public_url.rstrip("/")
+    print(f"[ngrok] tunnel open: {NGROK_URL} -> http://localhost:{NGROK_PORT}")
+    return NGROK_URL
+
+
+@app.on_event("shutdown")
+async def _close_ngrok():
+    """Disconnect the auto-started tunnel when the server stops."""
+    global _ngrok_tunnel
+    if _ngrok_tunnel is not None:
+        try:
+            from pyngrok import ngrok
+            ngrok.disconnect(_ngrok_tunnel.public_url)
+            ngrok.kill()
+            print("[ngrok] tunnel closed")
+        except Exception as e:
+            print(f"[ngrok] shutdown error (non-fatal): {e!r}")
+
+
 @app.on_event("startup")
 async def _prewarm():
+    if NGROK_AUTOSTART:
+        _open_ngrok_tunnel()
     asyncio.create_task(_cleanup_clips_loop())
     loop = asyncio.get_event_loop()
     for lang in SUPPORTED_LANGUAGES:

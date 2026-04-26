@@ -41,9 +41,22 @@ Open `http://localhost:3000` in a browser. Status badge should flip
 `connecting` → `LIVE` (pulsing green) within 1 second.
 
 **Terminal 3 — voice gateway (E2 only, when ready)**
+
+Two options:
+
+*Auto-start ngrok (recommended for dev — one terminal, no copy-paste):*
 ```bash
-ngrok http 8000          # in one tab
-python -m uvicorn voice_gateway.main:app --port 8000   # in another
+pip install pyngrok                                          # one time
+# in .env:  NGROK_AUTOSTART=true   NGROK_AUTHTOKEN=<your-token>
+python -m uvicorn voice_gateway.main:app --port 8000
+```
+The gateway opens the tunnel itself, prints the URL, and uses it
+automatically. NGROK_URL in .env is ignored when autostart is on.
+
+*Manual ngrok (matches the production layout):*
+```bash
+ngrok http 8000                                              # in one tab
+python -m uvicorn voice_gateway.main:app --port 8000         # in another
 ```
 Set `NGROK_URL` in `.env` to whatever ngrok prints.
 
