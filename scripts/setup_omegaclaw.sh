@@ -64,8 +64,10 @@ docker run -d -it \
   "TG_BOT_TOKEN=${TG_BOT_TOKEN}" \
   "TG_POLL_TIMEOUT=20" \
   "maxNewInputLoops=3" \
+  "maxWakeLoops=0" \
   "sleepInterval=3" \
-  "wakeupInterval=3600"
+  "wakeupInterval=3600" \
+  "maxOutputToken=1000"
 
 # ── Step 4: wait for container to be running ─────────────────────────────────
 echo ""
