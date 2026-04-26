@@ -148,7 +148,9 @@ async def _prewarm():
             _FILLER_CACHE[lang] = raw
             print(f"[prewarm] filler/{lang}: {len(raw)} bytes")
         except Exception as e:
-            print(f"[prewarm] filler/{lang} failed: {e!r}")
+            detail = getattr(e, "body", None) or getattr(e, "message", None) or str(e)
+            status = getattr(e, "status_code", None)
+            print(f"[prewarm] filler/{lang} failed: {type(e).__name__} status={status} detail={detail!r}")
 
 
 # ── Outbound call trigger (called by swarm-caller agent) ────────────
