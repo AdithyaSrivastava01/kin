@@ -41,65 +41,35 @@ Rahul wants a cardiologist ASAP
 
 ---
 
-## Integrating with OmegaClaw (3-step process)
+## Integrating with OmegaClaw (one command)
+
+```bash
+bash scripts/setup_omegaclaw.sh
+```
+
+This script starts the OmegaClaw Docker container, injects the HTTP bridge
+function into `agentverse.py`, registers the skill in `skills.metta`, and
+restarts the container. Run it once from the `kin/` directory with `.env`
+populated.
 
 ### Prerequisites
 
-- OmegaClaw running via Docker (`singularitynet/omegaclaw:hackathon2604`)
-- Telegram bot token from `@BotFather`
-- `ASI_ONE_API_KEY` and `AGENTVERSE_API_KEY`
-- healthswarm-intake running locally (`PYTHONPATH=. .venv/bin/python -m agents.swarm_intake.uagent_runner`)
-
-### Step 1 — Copy the Python adapter into OmegaClaw
-
-Copy `agentverse/healthswarm_skill.py` (from this folder) into OmegaClaw's
-`agentverse/` directory inside the running container:
-
-```bash
-docker cp agentverse/healthswarm_skill.py omegaclaw:/app/agentverse/healthswarm_skill.py
-```
-
-Or if using Option 2 (custom Docker), place the file in
-`repos/OmegaClaw-Core/agentverse/healthswarm_skill.py` before building.
-
-### Step 2 — Add the MeTTa bridge function
-
-Add the following to `src/skills.metta` in the OmegaClaw container:
-
-```bash
-docker exec -it omegaclaw bash
-# then edit /app/src/skills.metta
-```
-
-Add this function definition:
-
-```metta
-(= (healthswarm-booking $query)
-   (py-call (agentverse.healthswarm_booking $query)))
-```
-
-See `skills.metta.snippet` in this folder for the exact lines to paste.
-
-### Step 3 — Register the skill in getSkills
-
-In the same `src/skills.metta`, find the `getSkills` function and add:
-
-```metta
-"- Book a medical appointment for Maria, Joon, or Rahul via HealthSwarm AI: (healthswarm-booking string_in_quotes)"
-```
-
-Then restart OmegaClaw: `docker restart omegaclaw`
+- Docker running
+- `.env` with `ASI_ONE_API_KEY` and `TG_BOT_TOKEN` set
+- healthswarm-intake running on the host (`PYTHONPATH=. .venv/bin/python -m agents.swarm_intake.uagent_runner`)
 
 ---
 
 ## How it works under the hood
 
-OmegaClaw invokes skills via `py-call` → `healthswarm_booking(query)` in
-`healthswarm_skill.py` → `send_sync_message(INTAKE_ADDRESS, BookingRequest(query), timeout=180)`
-→ healthswarm-intake runs the full swarm (30–90 s) → returns `BookingResponse(result=...)`
-→ formatted text surfaces in your Telegram DM.
+OmegaClaw invokes skills via `py-call` → `healthswarm_skill(query)` appended
+to `agentverse.py` inside the container → **HTTP POST to
+`http://host.docker.internal:8015/book`** (the bridge server embedded in
+`uagent_runner.py`) → healthswarm-intake runs the full swarm (30–90 s) →
+returns `{"result": "..."}` → formatted text surfaces in your Telegram DM.
 
-The 180-second timeout covers the worst-case concurrent Twilio call polling cycle.
+The HTTP bridge bypasses uAgents envelope version incompatibilities between
+the Docker container and the host Python environment.
 
 ## Expected Telegram response
 
@@ -115,7 +85,6 @@ Why:       Closest dermatologist accepting their insurance; Korean-speaking staf
 
 - **Two protocols on one agent:** healthswarm-intake handles `BookingRequest` (OmegaClaw)
   and `ChatMessage` via Chat Protocol (ASI:One direct chat) on the same port 8010.
-- **No ngrok needed for OmegaClaw:** OmegaClaw polls Telegram outbound; healthswarm-intake
-  is reached directly via the Almanac address resolution. Twilio calls still require
-  `NGROK_URL` for Media Streams.
+- **HTTP bridge on port 8015:** OmegaClaw Docker → `host.docker.internal:8015/book`
+  → intake agent on host. Set `OMEGACLAW_BRIDGE_PORT` in `.env` to override.
 - **All LLM reasoning uses ASI:One** (`asi1` model via `https://api.asi1.ai/v1`).

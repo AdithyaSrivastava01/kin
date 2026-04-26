@@ -117,7 +117,7 @@ docker exec omegaclaw bash -c "
   if grep -q 'healthswarm-booking' '$SKILLS_METTA'; then
     echo '    bridge already present, skipping'
   else
-    printf '\n;; HealthSwarm booking skill\n(= (healthswarm-booking \$query)\n   (py-call (agentverse.healthswarm_booking \$query)))\n' >> '$SKILLS_METTA'
+    printf '\n;; HealthSwarm booking skill\n(= (healthswarm-booking \$query)\n   (py-call (agentverse.healthswarm_skill \$query)))\n' >> '$SKILLS_METTA'
     echo '    bridge function added'
   fi
 "
@@ -136,45 +136,43 @@ echo "    verification:"
 docker exec omegaclaw grep -n "healthswarm" "$SKILLS_METTA"
 
 # ── Step 6b: append healthswarm_skill function to agentverse.py ──────────────
+# Uses a plain HTTP bridge (host.docker.internal:8015) instead of uAgents
+# send_sync_message — avoids envelope version incompatibilities between the
+# Docker container and the host Python environment.
 AGENTVERSE_PY="$(docker exec omegaclaw find /PeTTa -name "agentverse.py" 2>/dev/null | head -1)"
+BRIDGE_PORT="${OMEGACLAW_BRIDGE_PORT:-8015}"
 echo ""
-echo "==> Patching agentverse.py ($AGENTVERSE_PY)..."
+echo "==> Patching agentverse.py ($AGENTVERSE_PY) — HTTP bridge on port $BRIDGE_PORT..."
 docker exec omegaclaw bash -c "
-  if grep -q 'def healthswarm_booking' '$AGENTVERSE_PY'; then
-    echo '    healthswarm_booking already in agentverse.py, skipping'
+  if grep -q 'healthswarm_skill' '$AGENTVERSE_PY'; then
+    echo '    healthswarm_skill already in agentverse.py, skipping'
   else
-    cat >> '$AGENTVERSE_PY' << 'PYEOF'
+    cat >> '$AGENTVERSE_PY' << PYEOF
 
 
-# ── HealthSwarm booking skill ────────────────────────────────────────────────
-import json as _json
+# ── HealthSwarm booking skill (HTTP bridge) ─────────────────────────��────────
+import json as _healthjson
+import urllib.request as _healthreq
 
-HEALTHSWARM_INTAKE_ADDRESS = (
-    \"agent1qw8ycstyjepy0646l8kmwzgzx2msv9ajmu0t5742c2kp2v5vgnehv6z2wsu\"
-)
+_HEALTHSWARM_BRIDGE = 'http://host.docker.internal:${BRIDGE_PORT}/book'
 
-class BookingRequest(Model):
-    query: str
-
-class BookingResponse(Model):
-    result: str
-
-def healthswarm_booking(query: str, timeout: int = 180) -> str:
+def healthswarm_skill(query, timeout=180):
     try:
-        request = BookingRequest(query=query)
-        raw = asyncio.run(_ask_agent(HEALTHSWARM_INTAKE_ADDRESS, request, int(timeout)))
-        try:
-            data = _json.loads(raw)
-            return data.get(\"result\", raw)
-        except (ValueError, AttributeError, TypeError):
-            return raw
+        payload = _healthjson.dumps({'query': str(query)}).encode()
+        req = _healthreq.Request(
+            _HEALTHSWARM_BRIDGE, data=payload,
+            headers={'Content-Type': 'application/json'}, method='POST'
+        )
+        with _healthreq.urlopen(req, timeout=int(timeout)) as resp:
+            data = _healthjson.loads(resp.read())
+            return data.get('result', str(data))
     except Exception as e:
-        return f\"error: {e}\"
+        return 'HealthSwarm error: ' + str(e)
 
-def healthswarm_skill(query: str, timeout: int = 180) -> str:
-    return healthswarm_booking(query, timeout)
+def healthswarm_booking(query, timeout=180):
+    return healthswarm_skill(query, timeout)
 PYEOF
-    echo '    healthswarm_skill added to agentverse.py'
+    echo '    healthswarm_skill (HTTP bridge) added to agentverse.py'
   fi
 "
 
