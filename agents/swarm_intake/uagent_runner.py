@@ -18,7 +18,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 # Python 3.10+ no longer auto-creates an event loop; uagents needs one up-front
 asyncio.set_event_loop(asyncio.new_event_loop())
 
-from uagents import Agent, Context, Protocol
+from uagents import Agent, Context, Model, Protocol
 from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement,
     ChatMessage,
@@ -143,6 +143,36 @@ async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
 
 
 agent.include(protocol, publish_manifest=True)
+
+
+# ── OmegaClaw direct-call protocol ──────────────────────────────────────────
+# OmegaClaw uses send_sync_message which returns on the first reply. The Chat
+# Protocol handler above sends an ACK + progress message before the result,
+# which would be captured instead. This separate request/response pair gives
+# OmegaClaw a clean single round-trip with a long timeout.
+
+class BookingRequest(Model):
+    query: str
+
+class BookingResponse(Model):
+    result: str
+
+@agent.on_message(BookingRequest, replies={BookingResponse})
+async def handle_booking_request(ctx: Context, sender: str, msg: BookingRequest):
+    patient_id, request_text = _resolve_patient(msg.query)
+    ctx.logger.info(f"[swarm-intake] OmegaClaw booking: patient={patient_id}")
+    try:
+        from pymongo import MongoClient
+        from agents.swarm_intake import agent as intake_agent
+
+        db = MongoClient(os.environ["MONGO_URI"]).get_default_database()
+        result = intake_agent.run(db, patient_id=patient_id, request_text=request_text)
+        reply = _format_reply(result)
+    except Exception as exc:
+        ctx.logger.exception("swarm-intake OmegaClaw booking error")
+        reply = f"Error: {exc}"
+    await ctx.send(sender, BookingResponse(result=reply))
+
 
 if __name__ == "__main__":
     agent.run()

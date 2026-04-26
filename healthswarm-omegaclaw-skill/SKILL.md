@@ -1,7 +1,7 @@
 # HealthSwarm — OmegaClaw Skill
 
 **Agent address:** `agent1qw8ycstyjepy0646l8kmwzgzx2msv9ajmu0t5742c2kp2v5vgnehv6z2wsu`
-**Protocol:** ASI:One Chat Protocol (uAgents `chat_protocol_spec`)
+**Protocol:** BookingRequest/BookingResponse (uAgents Model) + ASI:One Chat Protocol
 **Agentverse profile:** https://agentverse.ai/agents/agent1qw8ycstyjepy0646l8kmwzgzx2msv9ajmu0t5742c2kp2v5vgnehv6z2wsu
 
 ## What it does
@@ -20,17 +20,7 @@ The voice gateway places concurrent Twilio calls to all candidate clinics, detec
 receptionist's language on first utterance via Gemma E4B, and switches the ElevenLabs
 TTS voice automatically mid-call.
 
-## How to invoke from OmegaClaw
-
-Send any natural-language booking request. Reference a demo persona by first name:
-
-```
-Book a dermatology appointment for Joon
-Maria needs a Spanish-speaking primary care doctor this week
-Rahul wants a cardiologist ASAP
-```
-
-Supported demo personas:
+## Supported demo personas
 
 | Name | Patient ID | Specialty | Language |
 |---|---|---|---|
@@ -38,25 +28,76 @@ Supported demo personas:
 | Joon | joon-001 | Dermatology | Korean |
 | Rahul | rahul-001 | Cardiology | Hindi |
 
-You can also pass an explicit patient ID:
-
+Example queries from OmegaClaw/Telegram:
 ```
-patient_id=P042 Book an ophthalmology appointment, morning preferred
-```
-
-## Adding this skill to OmegaClaw
-
-In the OmegaClaw Telegram bot, run:
-
-```
-/addskill agent1qw8ycstyjepy0646l8kmwzgzx2msv9ajmu0t5742c2kp2v5vgnehv6z2wsu
+Book a dermatology appointment for Joon
+Maria needs a Spanish-speaking primary care doctor this week
+Rahul wants a cardiologist ASAP
 ```
 
-OmegaClaw will invoke the skill whenever a user's message is routed to this agent
-address. The agent responds with a human-readable booking summary (clinic name,
-phone, language, rationale).
+---
 
-## Expected response format
+## Integrating with OmegaClaw (3-step process)
+
+### Prerequisites
+
+- OmegaClaw running via Docker (`singularitynet/omegaclaw:hackathon2604`)
+- Telegram bot token from `@BotFather`
+- `ASI_ONE_API_KEY` and `AGENTVERSE_API_KEY`
+- healthswarm-intake running locally (`PYTHONPATH=. .venv/bin/python -m agents.swarm_intake.uagent_runner`)
+
+### Step 1 — Copy the Python adapter into OmegaClaw
+
+Copy `agentverse/healthswarm_skill.py` (from this folder) into OmegaClaw's
+`agentverse/` directory inside the running container:
+
+```bash
+docker cp agentverse/healthswarm_skill.py omegaclaw:/app/agentverse/healthswarm_skill.py
+```
+
+Or if using Option 2 (custom Docker), place the file in
+`repos/OmegaClaw-Core/agentverse/healthswarm_skill.py` before building.
+
+### Step 2 — Add the MeTTa bridge function
+
+Add the following to `src/skills.metta` in the OmegaClaw container:
+
+```bash
+docker exec -it omegaclaw bash
+# then edit /app/src/skills.metta
+```
+
+Add this function definition:
+
+```metta
+(= (healthswarm-booking $query)
+   (py-call (agentverse.healthswarm_skill $query)))
+```
+
+See `skills.metta.snippet` in this folder for the exact lines to paste.
+
+### Step 3 — Register the skill in getSkills
+
+In the same `src/skills.metta`, find the `getSkills` function and add:
+
+```metta
+"- Book a medical appointment for Maria, Joon, or Rahul via HealthSwarm AI: (healthswarm-booking string_in_quotes)"
+```
+
+Then restart OmegaClaw: `docker restart omegaclaw`
+
+---
+
+## How it works under the hood
+
+OmegaClaw invokes skills via `py-call` → `healthswarm_booking(query)` in
+`healthswarm_skill.py` → `send_sync_message(INTAKE_ADDRESS, BookingRequest(query), timeout=180)`
+→ healthswarm-intake runs the full swarm (30–90 s) → returns `BookingResponse(result=...)`
+→ formatted text surfaces in your Telegram DM.
+
+The 180-second timeout covers the worst-case concurrent Twilio call polling cycle.
+
+## Expected Telegram response
 
 ```
 Booking complete for Joon Park!
@@ -68,8 +109,8 @@ Why:       Closest dermatologist accepting their insurance; Korean-speaking staf
 
 ## Technical notes
 
-- The agent implements `chat_protocol_spec` with `publish_manifest=True`; it is
-  discoverable by any ASI:One-compatible client including OmegaClaw.
-- Booking takes 30–90 seconds (concurrent calls + LLM reasoning). A progress
-  message is sent immediately; the final result follows when the swarm completes.
-- All LLM reasoning uses ASI:One (`asi1` model via `https://api.asi1.ai/v1`).
+- **Two protocols on one agent:** healthswarm-intake handles `BookingRequest` (OmegaClaw)
+  and `ChatMessage` via Chat Protocol (ASI:One direct chat) on the same port 8010.
+- **No ngrok needed:** OmegaClaw polls Telegram outbound; healthswarm-intake is reached
+  directly via the Almanac address resolution.
+- **All LLM reasoning uses ASI:One** (`asi1` model via `https://api.asi1.ai/v1`).
