@@ -122,6 +122,25 @@ def _call_one(
         fp = fingerprint.run(clinic, transcript, requirements)
         if isinstance(call_result, dict):
             fp["result"] = call_result
+        # Carry the raw transcript on the fingerprint so the persistence
+        # layer can store it alongside the structured facts.
+        fp["transcript"] = transcript
+
+    # 4 — Persist to MongoDB so the dashboard /fingerprints/{patient_id}
+    # endpoint can surface it later. Non-fatal — if Mongo is down we still
+    # return the in-memory fp for the matcher to judge.
+    try:
+        from common.transcript_store import save_fingerprint
+        fp_id = save_fingerprint(
+            fp,
+            patient_id=patient.get("patient_id"),
+            patient_name=patient.get("name"),
+            call_sid=call_sid or None,
+        )
+        fp["fingerprint_id"] = fp_id
+    except Exception as e:
+        print(f"[swarm-caller] persist failed (non-fatal): {e!r}")
+
     with lock:
         out.append(fp)
 
