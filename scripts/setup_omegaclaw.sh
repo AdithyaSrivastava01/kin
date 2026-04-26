@@ -62,7 +62,10 @@ docker run -d -it \
   "provider=ASIOne" \
   "embeddingprovider=Local" \
   "TG_BOT_TOKEN=${TG_BOT_TOKEN}" \
-  "TG_POLL_TIMEOUT=20"
+  "TG_POLL_TIMEOUT=20" \
+  "maxNewInputLoops=3" \
+  "sleepInterval=3" \
+  "wakeupInterval=3600"
 
 # ── Step 4: wait for container to be running ─────────────────────────────────
 echo ""
