@@ -16,6 +16,17 @@ CALL_MAX_WAIT = float(os.getenv("CALL_MAX_WAIT_S", "150"))
 MAX_FALLBACK_ATTEMPTS = int(os.getenv("MAX_FALLBACK_ATTEMPTS", "3"))
 
 
+def _profile_problem(patient: dict) -> str:
+    """Best-effort reason-for-visit from the patient profile when the
+    free-text request didn't surface one. Used as the {{problem}}
+    dynamic variable for the booking agent.
+    """
+    diagnoses = patient.get("diagnoses") or []
+    if isinstance(diagnoses, list) and diagnoses:
+        return ", ".join(str(d) for d in diagnoses[:2])
+    return f"a follow-up consultation with a {patient.get('specialty', 'doctor')}"
+
+
 def _failed_fingerprint(clinic: dict, reason: str) -> dict:
     """Build a fingerprint dict locally for an unreachable clinic — no LLM round-trip."""
     name = clinic.get("name", "Unknown clinic")
@@ -52,7 +63,9 @@ def _call_one(
         },
     )
 
-    # 1 — Place the call
+    # 1 — Place the call (handed off to ElevenLabs Conversational AI
+    # via /call → eleven_caller.place_call, which populates the agent's
+    # dynamic_variables with the patient context below).
     try:
         resp = requests.post(
             f"{VOICE_GATEWAY_URL}/call",
@@ -62,12 +75,11 @@ def _call_one(
                 "patient_name": patient.get("name"),
                 "patient_id": patient.get("patient_id"),
                 "specialty": patient.get("specialty"),
+                "problem": requirements.get("problem") or _profile_problem(patient),
                 "insurance": patient.get("insurance"),
+                "tests_needed": requirements.get("tests_needed") or "none",
                 "time_pref": requirements.get("time_pref"),
                 "clinic_name": clinic.get("name"),
-                "allergies": patient.get("allergies", []),
-                "diagnoses": patient.get("diagnoses", []),
-                "medications": patient.get("medications", []),
             },
             timeout=VOICE_GW_TIMEOUT,
         )

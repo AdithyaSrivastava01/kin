@@ -102,9 +102,11 @@ python scripts/demo_rehearsal.py --real-call --to +1XXXXXXXXXX --patient joon-00
 ```
 
 The graph runs first. Then the voice gateway places an actual call.
-A teammate on the receiving end answers in Korean. Gemma E4B detects
-the language in ~3s, ElevenLabs switches voice mid-call, dashboard
-shows the real `LanguageDetected` beacon (no `mocked: true` flag).
+A teammate on the receiving end answers in Korean. ElevenLabs Scribe
+detects the language in ~3s, ElevenLabs TTS switches voice mid-call,
+dashboard shows the real `LanguageDetected` beacon (no `mocked: true`
+flag). After the call, swarm-fingerprint translates the transcript to
+English and swarm-matcher (LLM judge) picks the winning clinic.
 
 ### Option C — passive backdrop loop (during Q&A)
 
@@ -136,10 +138,12 @@ Counts buffered events and connected dashboard subscribers.
 | Intake → finder (green, parallel) | OSM-derived clinic search via 2dsphere `$near` |
 | Finder → intake CandidatesFound | 5 real LA clinics returned, names from OSM |
 | Intake → matcher (green) | Parallel ASI:One scoring of candidate clinics |
-| Matcher → intake ClinicRanked (orange) | Ranked clinics + scores |
-| Intake → caller (green) | Ranked booking task handoff |
-| Caller → clinic CallStarted (red) | Twilio dials the best-ranked receptionist first |
-| **🌐 amber banner + amber edge** | **Gemma E4B detected non-English; ElevenLabs switched voice** |
+| Matcher → intake ClinicRanked (orange) | Ranked clinics + scores; top N go to caller |
+| Intake → caller (green) | Parallel booking task handoff (top N clinics) |
+| Caller → clinic CallStarted (red) | Twilio dials the top-ranked clinics in parallel |
+| **🌐 amber banner + amber edge** | **ElevenLabs Scribe detected non-English; TTS switched voice** |
+| Fingerprint → matcher (green) | Per-call transcript translated + structured |
+| Matcher → intake ClinicMatched (orange) | LLM judge picks the winning clinic from fingerprints |
 | Caller → clinic BookingResult (red) | Appointment confirmed |
 
 ## Failure modes & fallbacks

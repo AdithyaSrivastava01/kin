@@ -7,8 +7,8 @@
 # uAgents runners, and dashboard relay. Pinning means subsequent installs
 # hit pip's wheel cache and skip dependency resolution.
 #
-# Excludes Vultr-only ML deps (torch, transformers, timm, accelerate) —
-# those install on the GPU box only via vultr/gemma_server.py setup.
+# Speech-to-text is handled by ElevenLabs Scribe (already pulled in via
+# the elevenlabs SDK) — no separate STT or GPU service required.
 
 # --- Core / shared ---
 pymongo==4.17.0
@@ -28,7 +28,7 @@ openai==2.32.0                  # ASI:One uses OpenAI-compatible API
 # --- E1 agents (Fetch.ai uAgents) ---
 uagents==0.24.2
 
-# --- E2 voice gateway ---
-twilio==9.10.5
+# --- Voice gateway ---
+# Outbound calls go through ElevenLabs Conversational AI (which handles
+# Twilio + STT + LLM + TTS server-side). We only need the SDK.
 elevenlabs==2.44.0
-pyngrok==8.0.0                  # optional: NGROK_AUTOSTART=true opens the tunnel from Python

@@ -1,5 +1,6 @@
 # swarm_intake — orchestrator agent
 import json
+import os
 import threading
 
 from common.asi import asi_chat
@@ -42,6 +43,12 @@ def _parse_requirements(request_text: str, profile: dict) -> dict:
             "Extract the patient's booking requirements from their request. "
             "Reply with ONLY valid JSON — no prose, no markdown:\n"
             '{"specialty": "<or null>", '
+            '"problem": "<one short phrase describing the symptom or '
+            'reason for the visit, e.g. \'recurring headaches\', '
+            '\'annual check-up\', \'persistent rash\'|or null>", '
+            '"tests_needed": "<comma-separated list of any specific '
+            'tests, scans or labs the patient asked for, e.g. '
+            '\'blood work, MRI\'|or null>", '
             '"time_pref": "<morning|afternoon|evening|weekend|ASAP|or null>", '
             '"urgency": "<ASAP|this week|this month|flexible|or null>", '
             '"gender_pref": "<male|female|no preference|or null>", '
@@ -49,7 +56,7 @@ def _parse_requirements(request_text: str, profile: dict) -> dict:
             '"other": "<any other requirement as a short string|or null>"}'
         ),
         user=request_text or f"Appointment for {profile.get('name', 'patient')}",
-        max_tokens=128,
+        max_tokens=192,
     )
     try:
         reqs = json.loads(raw)
@@ -65,6 +72,9 @@ def _parse_requirements(request_text: str, profile: dict) -> dict:
     return {k: v for k, v in reqs.items() if v}
 
 
+CALL_TOP_N = int(os.getenv("CALL_TOP_N", "3"))
+
+
 def run(db, patient_id: str, request_text: str = "", specialty: str | None = None) -> dict:
     """Orchestrate the full booking swarm for a patient.
 
@@ -72,8 +82,12 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
       1. Announce request (AppointmentRequest beacon).
       2. Fan out to profiler + finder in parallel threads.
       3. Parse per-conversation requirements from request_text via LLM.
-      4. swarm-matcher scores candidate clinics concurrently.
-      5. swarm-caller calls ranked clinics in order with up to 3 fallback attempts.
+      4. swarm-matcher.rank_candidates ranks clinics by metadata; we take
+         the top N to actually call.
+      5. swarm-caller calls those N clinics in PARALLEL; each call's
+         transcript is translated + fingerprinted by swarm-fingerprint.
+      6. swarm-matcher.run (LLM judge) picks the best clinic from the
+         resulting fingerprints — this is the canonical decision point.
 
     Returns a summary dict of the booking outcome.
     """
@@ -126,32 +140,48 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
     if not ranked:
         return {"error": "no clinic candidates found", "profile": profile}
 
+    to_call = [c for c in ranked if not c.get("disqualified")][:CALL_TOP_N]
+    if not to_call:
+        return {"error": "all clinic candidates disqualified", "profile": profile, "ranked": ranked[:5]}
+
     beacon("swarm-intake", "swarm-caller", "ChatMessage", {
-        "clinics": [c["name"] for c in ranked[:3]],
+        "clinics": [c["name"] for c in to_call],
         "requirements": requirements,
     })
-    booking = caller.call_ranked(ranked, profile, requirements)
+    fingerprints = caller.run(to_call, profile, requirements)
 
-    if booking.get("status") != "booked":
+    if not fingerprints:
+        return {"error": "no calls produced fingerprints", "profile": profile, "ranked": to_call}
+
+    beacon("swarm-intake", "swarm-matcher", "ChatMessage", {
+        "stage": "judge_fingerprints",
+        "fingerprints": [fp.get("clinic_name") for fp in fingerprints],
+    })
+    winner = matcher.run(requirements, fingerprints)
+
+    if not winner:
         return {
-            "error": "no clinic booked after fallback attempts",
+            "error": "matcher could not pick a winner from fingerprints",
             "profile": profile,
-            "ranked": ranked[:5],
-            "attempts": booking.get("attempts", []),
+            "fingerprints": fingerprints,
         }
 
-    best = booking.get("clinic", {})
-    fp = booking.get("fingerprint", {})
+    winner_fp = next(
+        (fp for fp in fingerprints if fp.get("clinic_name") == winner.get("name")),
+        fingerprints[0],
+    )
 
     return {
         "patient_id":   patient_id,
         "patient_name": profile.get("name"),
-        "clinic":       best.get("name"),
-        "phone":        best.get("phone"),
-        "language":     fp.get("result", {}).get("language") or profile.get("language"),
-        "rationale":    best.get("rationale") or fp.get("summary"),
-        "match_score":  best.get("match_score"),
-        "attempts":     len(booking.get("attempts", [])),
-        "call_summary": fp.get("summary"),
+        "clinic":       winner.get("name"),
+        "phone":        winner.get("phone"),
+        "language":     winner_fp.get("language") or profile.get("language"),
+        "rationale":    winner.get("rationale") or winner_fp.get("summary"),
+        "available":    winner_fp.get("available"),
+        "wait_time":    winner_fp.get("wait_time"),
+        "attempts":     len(fingerprints),
+        "call_summary": winner_fp.get("summary"),
+        "transcript_en": winner_fp.get("transcript_en"),
         "requirements": requirements,
     }

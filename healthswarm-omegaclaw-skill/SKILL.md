@@ -13,13 +13,16 @@ Books medical appointments by dispatching a 5-agent swarm:
 | healthswarm-intake | Orchestrator — routes requests, coordinates swarm |
 | healthswarm-profiler | Retrieves patient medical history from MongoDB |
 | healthswarm-finder | Geospatial clinic search (MongoDB 2dsphere, 15 km radius) |
-| healthswarm-matcher | LLM judge — ranks clinics concurrently before calling |
-| healthswarm-caller | Calls ranked clinics with up to 3 fallback attempts |
-| healthswarm-fingerprint | Summarises completed call transcripts into structured facts |
+| healthswarm-matcher | LLM judge — ranks clinics by metadata, then judges fingerprints to pick the winner |
+| healthswarm-caller | Calls the top-ranked clinics in parallel |
+| healthswarm-fingerprint | Translates and structures each call transcript |
 
-The voice gateway calls the best-ranked clinic first, detects the receptionist's
-language on first utterance via Gemma E4B, switches the ElevenLabs TTS voice
-automatically mid-call, and falls through to the next ranked clinic if booking fails.
+The voice gateway places parallel calls to the top-ranked clinics. Receptionist
+audio is transcribed by ElevenLabs Scribe (which also returns the detected
+language), and the ElevenLabs TTS voice switches to match. Each call's
+transcript is handed to swarm-fingerprint, which translates it to English
+and extracts structured facts. swarm-matcher then judges those fingerprints
+to pick the final winning clinic.
 
 ## Supported demo personas
 
