@@ -1,30 +1,34 @@
 # HealthSwarm Python dependencies — local development.
 #
-# Install:
-#   python -m pip install -r requirements.txt
+# Install (Python 3.10+; tested on 3.12):
+#   py -3.12 -m pip install -r requirements.txt
+#
+# Versions are pinned to the set verified working with the voice gateway,
+# uAgents runners, and dashboard relay. Pinning means subsequent installs
+# hit pip's wheel cache and skip dependency resolution.
 #
 # Excludes Vultr-only ML deps (torch, transformers, timm, accelerate) —
 # those install on the GPU box only via vultr/gemma_server.py setup.
 
 # --- Core / shared ---
-pymongo>=4.7
-dnspython>=2.6                 # SRV resolution for mongodb+srv://
-python-dotenv>=1.0
-requests>=2.31
-certifi>=2024.2.2              # fresh CA bundle for Atlas/Overpass TLS
+pymongo==4.17.0
+dnspython==2.8.0                # SRV resolution for mongodb+srv://
+python-dotenv==1.1.1
+requests==2.33.1
+certifi==2026.4.22              # fresh CA bundle for Atlas/Overpass TLS
 
 # --- Dashboard relay (FastAPI + GridFS uploads) ---
-fastapi>=0.115
-uvicorn[standard]>=0.30
-python-multipart>=0.0.9        # multipart form parsing for /upload
+fastapi==0.119.0
+uvicorn[standard]==0.37.0
+python-multipart==0.0.26        # multipart form parsing for /upload
 
 # --- LLM clients ---
-openai>=1.40                   # ASI:One uses OpenAI-compatible API
+openai==2.32.0                  # ASI:One uses OpenAI-compatible API
 
 # --- E1 agents (Fetch.ai uAgents) ---
-uagents>=0.19
+uagents==0.24.2
 
 # --- E2 voice gateway ---
-twilio>=9.0
-elevenlabs>=1.5
-pyngrok>=7.2                   # optional: NGROK_AUTOSTART=true opens the tunnel from Python
+twilio==9.10.5
+elevenlabs==2.44.0
+pyngrok==8.0.0                  # optional: NGROK_AUTOSTART=true opens the tunnel from Python
