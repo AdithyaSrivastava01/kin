@@ -127,9 +127,15 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     try:
         from pymongo import MongoClient
         from agents.swarm_intake import agent as intake_agent
+        import concurrent.futures as _cf
 
-        db = MongoClient(os.environ["MONGO_URI"]).get_default_database()
-        result = intake_agent.run(db, patient_id=patient_id, request_text=request_text)
+        def _run_swarm():
+            db = MongoClient(os.environ["MONGO_URI"]).get_default_database()
+            return intake_agent.run(db, patient_id=patient_id, request_text=request_text)
+
+        loop = asyncio.get_event_loop()
+        with _cf.ThreadPoolExecutor(max_workers=1) as pool:
+            result = await loop.run_in_executor(pool, _run_swarm)
         reply = _format_reply(result)
     except Exception as exc:
         ctx.logger.exception("swarm-intake error")
@@ -175,9 +181,15 @@ async def handle_booking_request(ctx: Context, sender: str, msg: BookingRequest)
     try:
         from pymongo import MongoClient
         from agents.swarm_intake import agent as intake_agent
+        import concurrent.futures as _cf
 
-        db = MongoClient(os.environ["MONGO_URI"]).get_default_database()
-        result = intake_agent.run(db, patient_id=patient_id, request_text=request_text)
+        def _run_swarm():
+            db = MongoClient(os.environ["MONGO_URI"]).get_default_database()
+            return intake_agent.run(db, patient_id=patient_id, request_text=request_text)
+
+        loop = asyncio.get_event_loop()
+        with _cf.ThreadPoolExecutor(max_workers=1) as pool:
+            result = await loop.run_in_executor(pool, _run_swarm)
         reply = _format_reply(result)
     except Exception as exc:
         ctx.logger.exception("swarm-intake OmegaClaw booking error")
