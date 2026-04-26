@@ -5,7 +5,8 @@ import threading
 from common.asi import asi_chat
 from common.telemetry import beacon
 from agents.swarm_profiler import agent as profiler
-from agents.swarm_finder import agent as finder, FINDER_RADIUS_M
+from agents.swarm_finder import agent as finder
+from agents.swarm_finder.agent import FINDER_RADIUS_M
 from agents.swarm_matcher import agent as matcher
 from agents.swarm_caller import agent as caller
 

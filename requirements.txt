@@ -27,3 +27,4 @@ uagents>=0.19
 # --- E2 voice gateway ---
 twilio>=9.0
 elevenlabs>=1.5
+pyngrok>=7.2                   # optional: NGROK_AUTOSTART=true opens the tunnel from Python
