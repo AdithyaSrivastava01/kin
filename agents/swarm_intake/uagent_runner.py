@@ -44,10 +44,18 @@ _PERSONA_MAP = {
     "rahul": "rahul-001",
 }
 
+# Specialty keywords → fallback demo patient when no name is recognised
+_SPECIALTY_FALLBACK = [
+    (["cardiol", "heart", "chest pain", "cardiac"], "rahul-001"),
+    (["dermat", "skin", "rash", "acne"],            "joon-001"),
+    (["primary care", "general", "family", "spanish", "gyno", "obgyn"], "maria-001"),
+]
+
 
 def _resolve_patient(text: str) -> tuple[str, str]:
     """Return (patient_id, request_text).
-    Priority: explicit patient_id= token > demo first name > default P001.
+    Priority: explicit patient_id= token > demo first name >
+              specialty keyword fallback > rahul-001 default.
     """
     for token in text.split():
         if token.startswith("patient_id="):
@@ -57,26 +65,39 @@ def _resolve_patient(text: str) -> tuple[str, str]:
     for name, pid in _PERSONA_MAP.items():
         if name in lower:
             return pid, text
-    return "P001", text
+    for keywords, pid in _SPECIALTY_FALLBACK:
+        if any(kw in lower for kw in keywords):
+            return pid, text
+    return "rahul-001", text
 
 
 def _format_reply(result: dict) -> str:
     if "error" in result:
         return f"Sorry, I couldn't complete the booking: {result['error']}"
+
+    available = result.get("available")
+    booking_status = str(available).lower() if available else "callback_needed"
+
+    if booking_status == "booked":
+        header = f"Appointment confirmed for {result.get('patient_name', 'your patient')}!"
+    elif booking_status == "callback_needed":
+        header = f"Availability gathered for {result.get('patient_name', 'your patient')} — call the clinic to confirm the slot."
+    elif booking_status == "failed":
+        header = f"Could not reach a clinic for {result.get('patient_name', 'your patient')}."
+    else:
+        header = f"Booking attempt complete for {result.get('patient_name', 'your patient')}."
+
     lines = [
-        f"Booking complete for {result.get('patient_name', 'your patient')}!",
+        header,
         f"Clinic:    {result.get('clinic', 'N/A')}",
         f"Phone:     {result.get('phone', 'N/A')}",
         f"Language:  {result.get('language', 'English')}",
     ]
     if result.get("rationale"):
         rationale = result["rationale"]
-        # Strip markdown code fences and JSON blobs from the rationale
         if rationale.startswith("```") or rationale.startswith("{"):
-            rationale = "Appointment confirmed based on availability and insurance match"
+            rationale = "Best match based on availability and insurance"
         lines.append(f"Why:       {rationale}")
-    if result.get("match_score") is not None and result["match_score"] > 0:
-        lines.append(f"Score:     {result['match_score']}/100")
     if result.get("attempts"):
         lines.append(f"Attempts:  {result['attempts']}")
     call_summary = result.get("call_summary", "")
@@ -199,11 +220,67 @@ async def handle_booking_request(ctx: Context, sender: str, msg: BookingRequest)
 
 # ── HTTP booking bridge ─────────────────────────────────────────────────────
 # Docker containers reach this via http://host.docker.internal:$PORT/book.
-# Bypasses uAgents envelope version issues between OmegaClaw and the host.
+# Two-phase flow:
+#   Phase 1 (/book)   — gather availability, store pending state, ask patient to confirm
+#   Phase 2 (/book)   — detect "confirm" in query, make booking call to winning clinic
 
 import json as _json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# Pending bookings keyed by patient_id: store winner + fingerprint + requirements
+_PENDING_BOOKINGS: dict = {}
+_PENDING_LOCK = threading.Lock()
+
+_CONFIRM_KEYWORDS = ("confirm", "yes book", "book it", "book the", "go ahead", "proceed")
+
+
+def _is_confirmation(text: str) -> bool:
+    lower = text.lower()
+    return any(kw in lower for kw in _CONFIRM_KEYWORDS)
+
+
+def _format_confirmation_prompt(result: dict) -> str:
+    """Return a Telegram-friendly message asking the patient to confirm the booking."""
+    name = result.get("patient_name", "the patient")
+    clinic = result.get("clinic", "N/A")
+    phone = result.get("phone", "N/A")
+    summary = result.get("call_summary", "")
+    key_facts = result.get("winner_key_facts", [])
+
+    lines = [
+        f"Availability found for {name}!",
+        f"Clinic:  {clinic}",
+        f"Phone:   {phone}",
+    ]
+    if summary:
+        lines.append(f"Summary: {summary}")
+    if key_facts:
+        lines.append("Available slots:")
+        for f in key_facts[:3]:
+            lines.append(f"  • {f}")
+    lines.append("")
+    lines.append("Reply 'confirm' to book this appointment, or ask for a different clinic.")
+    return "\n".join(lines)
+
+
+def _format_booked_reply(result: dict) -> str:
+    name = result.get("patient_name", "the patient")
+    clinic = result.get("clinic", "N/A")
+    phone = result.get("phone", "N/A")
+    time_slot = result.get("time_slot", "")
+    summary = result.get("call_summary", "")
+
+    lines = [f"Appointment confirmed for {name}!"]
+    if time_slot:
+        lines.append(f"Slot:    {time_slot}")
+    lines += [
+        f"Clinic:  {clinic}",
+        f"Phone:   {phone}",
+    ]
+    if summary:
+        lines.append(f"Summary: {summary}")
+    return "\n".join(lines)
 
 
 class _BookingHandler(BaseHTTPRequestHandler):
@@ -225,10 +302,53 @@ class _BookingHandler(BaseHTTPRequestHandler):
             from agents.swarm_intake import agent as intake_agent
 
             db = MongoClient(os.environ["MONGO_URI"]).get_default_database()
-            result = intake_agent.run(
-                db, patient_id=patient_id, request_text=request_text
-            )
-            reply = _format_reply(result)
+
+            # ── Phase 2: patient confirmed — make the booking call ────────────
+            with _PENDING_LOCK:
+                pending = _PENDING_BOOKINGS.get(patient_id)
+
+            if _is_confirmation(query) and pending:
+                with _PENDING_LOCK:
+                    _PENDING_BOOKINGS.pop(patient_id, None)
+
+                result = intake_agent.confirm_booking(
+                    db,
+                    patient_id=patient_id,
+                    winner=pending["winner"],
+                    winner_fp=pending["winner_fp"],
+                    requirements=pending["requirements"],
+                )
+                reply = _format_booked_reply(result) if not result.get("error") else _format_reply(result)
+
+            else:
+                # ── Phase 1: gather availability ──────────────────────────────
+                result = intake_agent.run(
+                    db, patient_id=patient_id, request_text=request_text
+                )
+
+                if result.get("error"):
+                    reply = _format_reply(result)
+                else:
+                    # Save pending state so Phase 2 can use it
+                    winner_clinic = {
+                        "name": result.get("clinic"),
+                        "phone": result.get("phone"),
+                        "language": result.get("language"),
+                    }
+                    winner_fp = {
+                        "key_facts": result.get("winner_key_facts", []),
+                        "summary": result.get("call_summary", ""),
+                        "language": result.get("language"),
+                        "available": result.get("available"),
+                    }
+                    with _PENDING_LOCK:
+                        _PENDING_BOOKINGS[patient_id] = {
+                            "winner": winner_clinic,
+                            "winner_fp": winner_fp,
+                            "requirements": result.get("requirements", {}),
+                        }
+                    reply = _format_confirmation_prompt(result)
+
             response = _json.dumps({"result": reply}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

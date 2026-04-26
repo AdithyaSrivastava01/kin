@@ -75,6 +75,55 @@ def _parse_requirements(request_text: str, profile: dict) -> dict:
 CALL_TOP_N = int(os.getenv("CALL_TOP_N", "3"))
 
 
+def confirm_booking(db, patient_id: str, winner: dict, winner_fp: dict, requirements: dict) -> dict:
+    """Phase 2 orchestration: call the winning clinic to confirm the agreed slot.
+
+    winner      — clinic dict returned by swarm-matcher
+    winner_fp   — fingerprint of the winning clinic's Phase 1 call
+    requirements — original booking requirements (specialty, insurance, etc.)
+    """
+    profile = profiler.run(db, patient_id)
+    if not profile or profile.get("error") == "PROFILE_NOT_FOUND":
+        return {"error": f"patient {patient_id!r} not found for booking confirmation"}
+
+    profile["specialty"] = requirements.get("specialty", winner.get("specialty"))
+
+    # Extract the best available time slot from the Phase 1 fingerprint
+    key_facts = winner_fp.get("key_facts", [])
+    time_slot = requirements.get("time_pref") or "the earliest available slot"
+    for fact in key_facts:
+        fl = fact.lower()
+        if any(w in fl for w in ("monday", "tuesday", "wednesday", "thursday",
+                                  "friday", "am", "pm", "morning", "afternoon",
+                                  "tomorrow", "week")):
+            time_slot = fact
+            break
+
+    beacon("swarm-intake", "swarm-caller", "BookingConfirmation", {
+        "clinic": winner.get("name"),
+        "time_slot": time_slot,
+        "patient": profile.get("name"),
+    })
+
+    fp = caller.make_booking_call(winner, profile, requirements, time_slot)
+
+    available = fp.get("available")
+    summary = fp.get("summary", "")
+
+    return {
+        "patient_id":   patient_id,
+        "patient_name": profile.get("name"),
+        "clinic":       winner.get("name"),
+        "phone":        winner.get("phone"),
+        "language":     fp.get("language") or profile.get("language"),
+        "available":    "booked" if available else "callback_needed",
+        "time_slot":    time_slot,
+        "rationale":    "Appointment confirmed at requested slot" if available else "Clinic could not confirm slot on this call",
+        "call_summary": summary,
+        "requirements": requirements,
+    }
+
+
 def run(db, patient_id: str, request_text: str = "", specialty: str | None = None) -> dict:
     """Orchestrate the full booking swarm for a patient.
 
@@ -172,16 +221,17 @@ def run(db, patient_id: str, request_text: str = "", specialty: str | None = Non
     )
 
     return {
-        "patient_id":   patient_id,
-        "patient_name": profile.get("name"),
-        "clinic":       winner.get("name"),
-        "phone":        winner.get("phone"),
-        "language":     winner_fp.get("language") or profile.get("language"),
-        "rationale":    winner.get("rationale") or winner_fp.get("summary"),
-        "available":    winner_fp.get("available"),
-        "wait_time":    winner_fp.get("wait_time"),
-        "attempts":     len(fingerprints),
-        "call_summary": winner_fp.get("summary"),
-        "transcript_en": winner_fp.get("transcript_en"),
-        "requirements": requirements,
+        "patient_id":      patient_id,
+        "patient_name":    profile.get("name"),
+        "clinic":          winner.get("name"),
+        "phone":           winner.get("phone"),
+        "language":        winner_fp.get("language") or profile.get("language"),
+        "rationale":       winner.get("rationale") or winner_fp.get("summary"),
+        "available":       winner_fp.get("available"),
+        "wait_time":       winner_fp.get("wait_time"),
+        "attempts":        len(fingerprints),
+        "call_summary":    winner_fp.get("summary"),
+        "winner_key_facts": winner_fp.get("key_facts", []),
+        "transcript_en":   winner_fp.get("transcript_en"),
+        "requirements":    requirements,
     }

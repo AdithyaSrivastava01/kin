@@ -142,12 +142,12 @@ docker exec omegaclaw bash -c "
   fi
 "
 
-# Add getSkills entry (idempotent)
+# Add getSkills entry (idempotent — check for the description line, not the bridge fn)
 docker exec omegaclaw bash -c "
-  if grep -q 'HealthSwarm' '$SKILLS_METTA'; then
+  if grep -q 'Book a medical appointment for any patient via the HealthSwarm' '$SKILLS_METTA'; then
     echo '    getSkills entry already present, skipping'
   else
-    sed -i 's|(tavily-search string_in_quotes)\"|(tavily-search string_in_quotes)\"\n    \"- Book a medical appointment for Maria, Joon, or Rahul using HealthSwarm AI: (healthswarm-booking string_in_quotes)\"|' '$SKILLS_METTA'
+    sed -i 's|\"- Search the web using the Tavily Search Agent: tavily-search string\"|\"- Search the web using the Tavily Search Agent: tavily-search string\"\n    \"- Book a medical appointment for any patient via the HealthSwarm AI agent swarm (real booking agents, multilingual, use for any medical appointment request): (healthswarm-booking string_in_quotes)\"|' '$SKILLS_METTA'
     echo '    getSkills entry added'
   fi
 "
@@ -170,7 +170,7 @@ docker exec omegaclaw bash -c "
     cat >> '$AGENTVERSE_PY' << PYEOF
 
 
-# ── HealthSwarm booking skill (HTTP bridge) ─────────────────────────��────────
+# ── HealthSwarm booking skill (HTTP bridge) ──────────────────────────────────
 import json as _healthjson
 import urllib.request as _healthreq
 

@@ -179,6 +179,21 @@ def run(candidates: list[dict], patient: dict, requirements: dict) -> list[dict]
     return results
 
 
+def make_booking_call(clinic: dict, patient: dict, requirements: dict, time_slot: str) -> dict:
+    """Phase 2: follow-up call to confirm a specific slot at the winning clinic."""
+    booking_reqs = dict(requirements)
+    booking_reqs["problem"] = (
+        f"Following up to confirm the '{time_slot}' appointment slot "
+        f"discussed in our earlier call for {patient.get('name')}"
+    )
+    booking_reqs["time_pref"] = time_slot
+
+    out: list = []
+    lock = threading.Lock()
+    _call_one(clinic, patient, booking_reqs, out, lock)
+    return out[0] if out else _failed_fingerprint(clinic, "booking confirmation call failed")
+
+
 def call_ranked(ranked_clinics: list[dict], patient: dict, requirements: dict) -> dict:
     """Call ranked clinics in order until one books or fallback attempts are exhausted."""
     attempts = []

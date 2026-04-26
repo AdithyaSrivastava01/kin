@@ -104,11 +104,12 @@ def _derive_booking_status(state: dict) -> str:
     s = str(br.get("status", "")).lower()
     if s in ("booked", "failed", "callback_needed"):
         return s
-    if state.get("call_successful") == "success":
-        return "booked"
+    # call_successful=success means the conversation completed normally —
+    # NOT that a booking was confirmed. Default to callback_needed so the
+    # fingerprint accurately reflects that a slot was gathered, not locked.
     if state.get("status") == "failed":
         return "failed"
-    return "in_progress"
+    return "callback_needed"
 
 
 @app.get("/health")

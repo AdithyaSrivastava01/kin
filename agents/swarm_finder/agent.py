@@ -3,7 +3,7 @@ import os
 from common.telemetry import beacon
 from common.geo import eta_from_geojson
 
-FINDER_RADIUS_M = int(os.getenv("FINDER_RADIUS_M", "15000"))
+FINDER_RADIUS_M = int(os.getenv("FINDER_RADIUS_M", "50000"))
 FINDER_LIMIT    = int(os.getenv("FINDER_LIMIT", "5"))
 
 
